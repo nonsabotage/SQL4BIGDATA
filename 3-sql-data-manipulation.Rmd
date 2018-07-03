@@ -1,0 +1,1182 @@
+---
+title: "Ch3 データ加工のためのSQL"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        highlight: tango
+        theme: flatly
+        css: mycss.css
+        code_folding: show
+        include:
+            - in_header: in_head.html
+        df_print: "paged"
+
+---
+
+
+# コネクションの設定
+
+```{r setup, message=FALSE}
+
+## load libs
+libs <- c( "DBI", "RPostgreSQL",  "purrr", "dplyr", "yaml")
+for( lib in libs ) {
+    library( lib, character.only=TRUE )  
+} 
+
+## connection db
+config <-
+  read_yaml("config.yaml") %>%
+  update_list( drv =  ~  dbDriver(drv))
+con <- lift(dbConnect)(config)
+knitr::opts_chunk$set(connection = "con")
+```
+
+
+# 1つの値に対する操作
+
+## CASE式
+
+- コード値のままではレポートを書きずらい
+- コード値をラベルに置き換える
+
+
+
+
+```{sql}
+SET CLIENT_ENCODING TO "SJIS";
+SELECT
+    user_id
+    , CASE
+        WHEN cast(register_device as numeric) = 1 THEN 'PC'
+        WHEN cast(register_device as numeric) = 2 THEN 'SP'
+        WHEN cast(register_device as numeric) = 3 THEN 'アプリ'
+        ELSE ''
+      END AS device_name
+FROM
+    mst_users
+;
+```
+
+
+
+## substring + 正規表現
+
+- 文字列操作で適当な粒度に調整
+
+
+
+```{sql}
+SELECT
+    stamp
+    , substring( referrer from 'https?://([^/]*)' ) AS referrer_host
+FROM
+    access_log
+;
+```
+
+URLを加工してパスや特定のキーを抽出することが可能である. 
+
+```{sql}
+SELECT
+    stamp
+    , url
+    , substring( url from '//[^/]+([^?#]+)' ) AS path
+    , substring( url from 'id=([^&]*)' ) AS id
+FROM
+    access_log
+;
+```
+
+
+
+
+## split_part, split
+
+バックスラッシュによる分解を使って, urlを階層ごとに分けるクエリ.
+split_partの使い方を覚えよう.
+
+```{sql}
+SELECT
+    stamp
+    , url
+    , split_part( substring( url from '//[^/]+([^?#]+)'), '/', 2 ) AS path1
+    , split_part( substring( url from '//[^/]+([^?#]+)'), '/', 3 ) AS path1
+FROM
+    access_log
+;
+```
+
+
+
+## date
+
+- 時間を利用することは避けられない
+- ミドルウェアによってタイムゾーンの扱いが異なるのに注意しよう
+
+### 現在の日付とタイムスタンプを取得するクエリ
+
+```{sql}
+SELECT
+    CURRENT_DATE as dt
+    , CURRENT_TIMESTAMP as stamp
+;
+    
+```
+
+
+
+文字列で保持された時間データは`CAST`を利用して, 型変換をするのが
+良い. 
+
+```{sql}
+SELECT
+    CAST( '2016-01-30' AS date ) AS dt
+    , CAST( '2016-01-30 12:00:00' AS timestamp ) AS stamp
+;
+```
+
+日付情報から特定の情報を取り出すには`EXTRACT`を利用する. 
+
+```{sql}
+SELECT 
+    stamp
+    , EXTRACT( YEAR FROM stamp ) AS year
+    , EXTRACT( MONTH FROM stamp ) AS month
+    , EXTRACT( DAY FROM stamp ) AS day
+    , EXTRACT( HOUR FROM stamp ) AS hour
+FROM
+    ( SELECT CURRENT_TIMESTAMP AS stamp ) AS t
+;
+
+```
+
+
+## coalesce
+
+NULLとの演算はNULLになるため, NULLを含むカラムを使った演算は
+注意が必要である. coalesceはNULLに対して代入が可能となる. 
+
+
+```{sql}
+SELECT
+    purchase_id
+    , amount
+    , coupon
+    , amount - coupon AS discount_amount1
+    , amount - COALESCE( coupon, 0 ) AS discount_amount2
+FROM
+    purchase_log_with_coupon
+;
+
+```
+
+
+
+# 複数の値に対する操作
+
+## CONCAT
+
+文字列を連結するにはCONCATか||演算子を利用する. 
+
+```{sql}
+SET CLIENT_ENCODING TO "SJIS";
+SELECT
+    user_id
+    , CONCAT( pref_name, city_name ) AS pref_city
+FROM 
+    mst_user_location
+;
+```
+
+## SIGN, greatest, least
+
+複数の値を比較する. 
+
+
+```{sql}
+SELECT
+    year
+    , q1
+    , q2
+    , CASE
+        WHEN q1 < q2 THEN '+'
+        WHEN q1 = q2 THEN ' '
+        ELSE '-'
+      END AS judge_q1_q2
+    , q2-q1 AS diff_q2_q1
+    , SIGN(q2-q1) AS sign_q2_q1
+FROM 
+    quarterly_sales
+ORDER BY
+    year
+;
+
+
+```
+
+2カラムを比較する場合には上記の方法で良いが, 
+増えてくると別の方法が必要となる. `greatest`, `least`を利用. 
+greatestは最大値, leastは最小値を取得する. 
+
+
+
+#### 年間の最大/最小の四半期売り上げを見つけるクエリ
+```{sql}
+SELECT
+    year
+    , greatest( q1, q2, q3, q4 ) AS greatest_sales
+    , least( q1, q2, q3, q4 ) AS least_sales
+FROM
+    quarterly_sales
+ORDER BY
+    year
+;
+```
+
+
+関数がない場合でも, 簡単なものならば自分で作成することができる. 
+
+#### 単純な加算による平均四半期売り上げを求めるクエリ
+
+```{sql}
+SELECT
+    year
+    , ( q1 + q2 + q3 + q4 ) / 4 AS average
+FROM
+    quarterly_sales
+ORDER BY
+    year
+;
+```
+
+
+上記の演算では2017年の値にNULLがあるため, 平均値が正しく算出できていない. 
+そこで次のようにして, 符号関数から0より大きい列の数を調べる. 
+
+#### NULLでないカラムのみを仕様して平均値を求めるクエリ
+```{sql}
+SELECT
+    year
+    , (
+        COALESCE(q1, 0) + COALESCE(q2, 0) + COALESCE(q3, 0) + COALESCE(q4, 0)
+    ) / (
+        SIGN(COALESCE(q1, 0)) + SIGN(COALESCE(q2, 0)) + SIGN(COALESCE(q3, 0)) + SIGN(COALESCE(q4, 0))
+    ) AS average
+FROM
+    quarterly_sales
+ORDER BY
+    year
+;
+```
+
+
+
+## 除算, NULLIF関数
+
+- 2つの値の比率を計算する
+- 1レコードに含まれる値を組み合わせて割合を計算する
+
+
+Postgresは型に厳密であるため, 整数値同士の割り算結果は
+実数にはならない. そこで事前に型変換をする必要がある. 
+型変換は明示的にやってもよいし, 実数を乗じることでも成立する. 
+
+#### 整数型のデータの除算を行うクエリ
+```{sql}
+SELECT 
+    dt
+    , ad_id
+    , clicks / impressions as force_int
+    , 100.0 * clicks / impressions AS ctr_as_percent
+FROM
+    advertising_stats
+WHERE
+    dt = '2017-04-01'
+ORDER BY
+    dt, ad_id
+;
+```
+
+
+ゼロ除算を避ける必要がある場合にはCASE式を利用しよう. 
+またはNULLの伝播を利用する方法で対処しよう. 
+
+
+
+#### 0除算を避けてCTRを計算するクエリ
+
+
+
+
+```{sql}
+SELECT
+    dt
+    , ad_id
+    , CASE
+        WHEN impressions > 0 THEN 100.0 * clicks / impressions
+        ELSE NULL
+        END AS ctr_as_percent_by_case
+    , 100.0 * clicks / NULLIF( impressions, 0 ) AS ctr_as_percent_by_null
+FROM
+    advertising_stats
+ORDER BY
+    dt, ad_id
+;
+```
+
+
+
+## abs, power, sqrt, point
+
+- 2つの値の距離を比較する
+
+
+#### 1次元のデータに対して絶対値とRMSを計算するクエリ
+
+```{sql}
+SELECT
+    abs(x1 - x2) as abs
+    , sqrt(power(x1-x2, 2)) as rms
+FROM
+    location_1d
+;
+```
+
+
+ユークリッド距離についても同様に計算する.　
+差分の二乗ノルム. Postgresの場合にはPoint型が存在するため, 
+距離演算子`<->`を利用して簡単に演算をするこｔが可能である. 
+
+
+#### 2次元おデータに対して二乗平均平方根を計算する
+
+
+```{sql}
+SELECT
+    sqrt(power(x1-x2, 2) + power(y1-y2,2)) AS dist
+    , point(x1, y1) <-> point(x2, y2) as dist2
+from
+    location_2d
+;
+```
+
+## interval, 日付・時刻
+
+- 日付・時刻を計算する
+- 差分
+- timestamp型へCASTしてから処理
+
+#### 未来や過去の日付・時刻を計算するクエリ
+```{sql}
+SELECT
+    user_id
+    , register_stamp::timestamp AS register_stamp
+    , register_stamp::timestamp + '1 hour'::interval as after_1_hour
+    , register_stamp::timestamp - '30 minutes'::interval as before_30_minutes
+    , register_stamp::date as register_date
+    , (register_stamp::date + '1 day'::interval )::date as after_1_day
+    , (register_stamp::date - '1 month'::interval )::date as  before_1_month
+    , (register_stamp::date - '1 month'::interval ) as before_1_month2
+FROM
+    mst_users_with_birthday
+;
+```
+
+
+2つの日付データを用いて差分を求めることも可能である. 
+差分結果はint型になっている. 
+
+#### 2つの皮膚家の日数差を計算するクエリ. 
+
+
+```{sql}
+SELECT
+    user_id
+    , CURRENT_DATE as today
+    , register_stamp::date as register_date
+    , CURRENT_DATE -  register_stamp::date as diff_days
+FROM 
+    mst_users_with_birthday
+;
+```
+
+
+日付の差分からユーザーの年齢を求めたい場合があるが, 閏年が
+あるため次のようなクエリが必要となる. `age`関数は現在の年齢を与えるだけでなく, 
+２つの引数を与えることで任意時点の年齢も特定することが可能である. 
+
+
+#### age関数を用いて年齢を計算するクエリ
+
+```{sql}
+SELECT
+    user_id
+    , CURRENT_DATE as today
+    , register_stamp::date as register_date
+    , birth_date::date as birth_date
+    , EXTRACT(YEAR FROM age(birth_date::date)) as current_age
+    , EXTRACT(YEAR FROM age(register_stamp::date, birth_date::date)) as register_age
+FROM
+    mst_users_with_birthday
+;
+```
+
+
+
+## inet, <<, split_part,ipad
+
+
+ポスグレにはIPアドレスを扱うための型が存在している. 
+inetを使おう
+
+#### inet型を用いたIPアドレスの比較クエリ
+```{sql}
+SELECT
+    CAST('172.16.4.46' as inet) < cast('172.17.49.127' as inet ) as lt
+    , CAST('172.16.4.46' as inet) >  cast('172.17.49.127' as inet ) as gt
+;
+```
+
+#### inet型を用いてIPアドレスの範囲を扱うクエリ
+
+```{sql}
+SELECT
+    CAST('172.16.4.46' as inet) << cast('172.16.4.46/8' as inet ) as is_contained
+;
+```
+
+
+
+#### 整数型や文字列としてIPアドレス処理
+
+```{sql}
+SELECT
+    ip
+    , CAST( split_part(ip, '.', 1) as integer) as ip_part_1
+    , CAST( split_part(ip, '.', 2) as integer) as ip_part_2
+    , CAST( split_part(ip, '.', 3) as integer) as ip_part_3
+    , CAST( split_part(ip, '.', 4) as integer) as ip_part_4
+FROM (        
+    SELECT CAST('172.16.4.46' as text) as ip
+) as tmp
+;
+```
+
+
+3桁の0埋でIPアドレスを処理する. 
+
+#### IPアドレスを0埋した文字列に変換するクエリ
+
+```{sql}
+SELECT
+    ip
+    , lpad(split_part(ip, '.', 1), 3, '0')
+    || lpad(split_part(ip, '.', 2), 3, '0')
+    || lpad(split_part(ip, '.', 3), 3, '0')
+    || lpad(split_part(ip, '.', 4), 3, '0') as ip_lpad3
+FROM (        
+    SELECT CAST('172.16.4.46' as text) as ip
+) as tmp
+; 
+```
+
+
+
+# 1つのテーブルに対する操作
+
+プログラミング言語としてのSQLの特徴は
+データを集合として扱うことにある. 
+実際のデータではサイズが数億レコードになることも珍しくないため, 
+データの代表値を調べる必要がある. 
+
+#### データの集約
+近年のSQLでは集合関数だけでなくウィンドウ関数といった
+データの順序を考慮した処理が可能となっている. 
+
+## グループの特徴を捉える
+
+
+#### 集約関数を用いてテーブル全体の特徴量を計算するクエリ
+```{sql}
+SELECT
+    count(*) as total_count
+    , count(distinct user_id) as user_count
+    , count(distinct product_id) as product_count
+    , sum(score) as sum
+    , avg(score) as avg
+    , max(score) as max
+    , min(score) as min
+FROM
+    review
+;
+```
+
+
+
+
+#### 集約関数を用いてグルーピング化したテーブルの特徴量を計算するクエリ
+```{sql}
+SELECT
+    user_id
+    , count(*) as total_count
+    , count(distinct user_id) as user_count
+    , count(distinct product_id) as product_count
+    , sum(score) as sum
+    , avg(score) as avg
+    , max(score) as max
+    , min(score) as min
+FROM
+    review
+GROUP BY
+    user_id
+;
+```
+
+
+
+ウィンドウ関数を用いることで簡潔で効率的に集約関数の結果と元の値のを組み合わせることが可能. 
+次の例では個別のレビュースコアとユーザーの平均レビュースコアとの差を
+計算するクエリ. `OVER`で分割軸をコントロールしている. 
+何も書かない場合には全体を通じてという処理になる. 
+
+```{sql}
+SELECT
+    user_id
+    , product_id
+    , score
+    , avg(score) over() as avg_score
+    , avg(score) over(PARTITION BY user_id) as user_avg_score
+    , score - avg(score) over(PARTITION BY user_id) as user_avg_score_diff
+FROM
+    review
+;
+
+
+```
+
+
+
+## グループの中での順序を扱う
+
+本来SQLで扱うデータには順序の概念がないが
+ランキングなどを作成したい場面がでてくる. 
+OVER(ウィンドウ関数)を利用することで簡単に対処することが可能である. 
+
+OVERのなかで並び変えをすることで, その順番に対して処理を行うことが可能である. 
+
+- rank: タイ有り, 飛ばしありランク
+- dense_rank: タイ有り, 飛ばしなしランク
+- lag, lead: 現在の行を基準に後ろか前を参照する
+- rownumber: その順序に対して１意なランキング番号を与える
+
+#### ウィンドウ関数のORDER BY句を用いてテーブル内の順序を扱うクエリ
+
+```{sql}
+SELECT
+    product_id
+    , score
+    , ROW_NUMBER() OVER(ORDER BY score DESC) as row
+    , RANK() OVER(ORDER BY score DESC) as rank
+    , DENSE_RANK() OVER(ORDER BY score DESC) as dense_rank
+    , LAG(product_id) OVER(ORDER BY score DESC) as lag1
+    , LAG(product_id, 2) OVER(ORDER BY score desc) as lag2
+    , LEAD(product_id) OVER(ORDER BY score desc) as lead1
+    , lead(product_id, 2) OVER(order by score desc) as lead2
+FROM 
+    popular_products
+ORDER BY
+    row
+;
+```
+
+
+order by と集約関数を組み合わせることで, 集約関数の適用範囲を柔軟に設定することが可能となる. 
+次のクエリでは, ランキングの最上位(unbounded preceding)から現在の行までのスコアを合計した
+累積スコアを計算している. というか累積和を計算するのにこんな手間が必要であるのか?
+また, local_avgでは現在の行とその前後1行ずつの合計3行の平均スコアを計算している. 
+また, FIRST_VALUEウィンドウ関数とLAST_VALUEウィンドウ関数は
+それぞれウィンドウ内の最上位のレコードの値と最下位のレコードの値を抽出する関数である. 
+
+ちなみに次のクエリでROWSは変数名ではなくて, ポスグレの予約言語であることに注意. 
+
+
+```{sql}
+SELECT
+    product_id
+    , score
+    , row_number() over(order by score desc) as row
+    , sum(score) over(order by score desc rows between unbounded preceding and current row)
+      as cum_score
+    , avg(score) over(order by score desc rows between 1 preceding and 1 following)
+      as local_avg
+    , first_value(product_id) over(order by score desc rows between unbounded preceding and unbounded following) 
+      as first_value
+    , last_value(product_id) over(order by score desc rows between unbounded preceding and unbounded following)
+      as last_value
+FROM
+    popular_products
+ORDER BY
+    row
+;
+
+
+
+```
+
+
+
+
+
+> ウィンドウフレームとは?
+> 
+> フレーム指定とは現在のレコードのITいに基づき, 相対的なウィンドウを定義するための構文である
+
+
+`array_agg`という配列を作成する関数を使うと次のような処理が
+可能となる. 
+
+```{sql}
+SELECT
+    product_id
+    , row_number() over(order by score desc) as row
+    
+    , array_agg(product_id) 
+      over(order by score desc rows between unbounded preceding and unbounded following) 
+      as whole_agg
+     
+    , array_agg(product_id)
+      over(order by score desc rows between unbounded preceding and current row)
+      as cum_agg
+     
+    , array_agg(product_id)
+      over(order by score desc rows between 1 preceding and 1following)
+      as local_agg
+     
+FROM
+    popular_products
+WHERE
+    category = 'action'
+ORDER BY 
+    row
+;
+```
+
+
+
+あたりまでもあるが, partition by と　order by は組み合わせて, over内で
+利用することが可能である. 
+
+
+#### ウィンド関数を用いてカテゴリごとの順位を計算するクエリ
+
+```{sql}
+SELECT
+    category
+    , product_id
+    , score
+    
+    , row_number()
+      over(partition by category order by score desc)
+      as row
+     
+    , rank()
+      over(partition by category order by score desc)
+      as rank
+      
+    , dense_rank()
+      over(partition by category order by score desc)
+      as dense_rank
+     
+FROM
+    popular_products
+ORDER BY 
+    category, row
+;
+    
+```
+
+
+ウィンド関数を利用することで, 各カテゴリの上位N件を抽出するというような処理が可能となる. 
+ただし, where句にはウィンド関数を指定できないため, select句で
+ウィンドウ関数を使用した結果をサブクエリとして,　その外側でWHEREを使う
+
+
+```{sql}
+select * 
+from (
+    select
+        category
+        , product_id
+        , score
+        , row_number()
+          over(partition by category order by score desc)
+          as rank
+    from 
+        popular_products
+) as popular_products_with_rank
+where
+    rank <= 2
+order by category, rank
+;
+
+
+
+
+```
+
+
+#### カテゴリごとのランキング最上位の商品を抽出するクエリ
+
+```{sql}
+select
+    distinct category
+    , first_value(product_id)
+      over(partition by category order by score desc rows between unbounded preceding and unbounded following)
+      as product_id
+    , first_value(score)
+      over(partition by category order by score desc rows between unbounded preceding and unbounded following)
+      as score
+from
+    popular_products
+;
+```
+
+
+
+
+
+
+## 縦持ちを横持ちへ変換する
+
+SQLはローメジャーを前提とした処理が多いので縦持ちでデータを
+保持するのが鉄則だが, 
+最終的なアウトプットでは横持ちの場合が良いときが多い.  結局のところ, 効率的な処理はなく
+地道に`case`文を記述していくしか方法はない. 
+
+#### 行で保存された指標の値を列に変換するクエリ
+
+```{sql}
+select 
+    dt
+    , max(case when indicator = 'impressions' then val end) as impressions
+    , max(case when indicator = 'sessions' then val end) as sessions
+    , max(case when indicator = 'users' then val end) as users
+from
+    daily_kpi
+group by
+    dt
+order by 
+    dt
+;
+```
+
+あらかじめ列数が決定できない場合には, 
+データをカンマ区切りで文字列として保持するなどが考えられる. 
+
+
+#### 行を集約してカンマ区切りの文字列に変換するクエリ
+
+
+```{sql}
+select
+    purchase_id
+    , string_agg(product_id, '/') as product_ids
+    , sum(price) as amount
+from
+    purchase_detail_log
+group by 
+    purchase_id
+order by
+    purchase_id
+;
+```
+
+
+## 横持ちを縦持ち
+
+横持ちを縦持ちに変換するのは案外難しい. cross joinでざくっと
+前途通りの組み合わせを作成する. cross joinだと
+キーを指定しておかなくても大丈夫. 
+
+
+```{sql}
+select
+    q.year
+    , case
+        when p.idx = 1 then 'q1'
+        when p.idx = 2 then 'q2'
+        when p.idx = 3 then 'q3'
+        when p.idx = 4 then 'q4'
+    end
+    , case
+        when p.idx = 1 then q.q1
+        when p.idx = 2 then q.q2
+        when p.idx = 3 then q.q3
+        when p.idx = 4 then q.q4
+    end
+from
+    quarterly_sales as q
+    cross join (
+        select 1 as idx
+        union all select 2 idx
+        union all select 3 idx
+        union all select 4 idx
+    ) as p
+;
+
+
+```
+
+
+固定長の場合で配列がある際に行へ展開するのは比較的容易であるが,　
+任意長の場合少し複雑な処理が必要となる. 
+
+#### テーブル関数を用いて配列を行に展開するクエリ
+```{sql}
+select
+    unnest(array['A001','A002','A003']) as product_id;
+```
+
+
+
+#### テーブル関数を用いてカンマ区切りのデータを行に展開するクエリ
+
+
+```{sql}
+select
+    purchase_id
+    , product_id
+from
+    purchase_log as p
+cross join (
+    select 
+        unnest(string_to_array(product_ids, ',')) as product_id
+    from (
+        select
+            purchase_id
+            , string_agg(product_id, ',') as product_ids
+            , sum(price) as amount
+        from
+            purchase_detail_log
+        group by 
+            purchase_id
+        order by
+            purchase_id
+    ) as t
+) as q
+;        
+```
+
+
+ポスグレの場合にはもっと楽に処理が可能. 
+
+```{sql}
+select 
+    * , regexp_split_to_table(product_ids, ',') as product_id
+from (
+    select
+        purchase_id
+        , string_agg(product_id, ',') as product_ids
+        , sum(price) as amount
+    from
+        purchase_detail_log
+    group by 
+        purchase_id
+    order by
+        purchase_id
+) as t
+;
+```
+
+
+# 複数のテーブルに対する操作
+
+## 複数のテーブルを立に並べる
+
+
+両者でそろっていない変数がある場合には
+NULLを駆使して必要な変数を調整する. 
+union allに対してはunion distinctが存在する. 
+後者は重複を削除する処理が追加される. 
+
+
+#### UNION ALL句を用いてテーブルを縦に並べるクエリ
+
+```{sql}
+select 
+    'app1' as app_name
+    , user_id
+    , name
+    , email
+from 
+    app1_mst_users
+union all
+    select
+        'app2' as app_name
+        , user_id
+        , name
+        , null as email
+    from
+        app2_mst_users
+;
+```
+
+
+
+#### 複数のテーブルを結合して横に並べるクエリ
+
+
+```{sql}
+select
+    m.category_id
+    , m.name
+    , s.sales
+    , r.product_id as sale_product
+from 
+    mst_categories as m
+    inner join 
+        category_sales as s
+    on 
+        m.category_id = s.category_id
+    inner join
+        product_sale_ranking as r
+    on 
+        m.category_id = r.category_id
+;
+```
+
+
+## 条件のフラグを0と1で表現する
+
+#### クレジットカード登録と購入履歴の有無を0,1フラグで表現するクエリ
+
+```{sql}
+select
+    m.user_id
+    , m.card_number
+    , count(p.user_id) as purchase_count
+    , case 
+        when m.card_number is not null then 1 else 0 
+    end as has_card
+    , sign(count(p.user_id)) as has_purchased
+from
+    mst_users_with_card_number as m
+left outer join
+    purchase_log as p
+on
+    m.user_id = p.user_id
+group by
+    m.user_id, m.card_number
+order by
+    m.user_id, m.card_number
+;
+```
+
+
+
+## 計算したテーブルに名前を付けて再利用する
+
+共通テーブル式CTE(common table expression)を用いることで, 
+1つのクエリの中で使える一時的なテーブルに名前を付けて
+利用できる. CTEは物理的なテーブルを作成できない環境においても, 
+1次的なテーブルとしてとても有効. 
+
+#### カテゴリごとの順位を付与したテーブルに名前を付けるクエリ
+
+```{sql}
+with 
+    product_sale_ranking as (
+        select
+            category_name
+            , product_id
+            , sales
+            , row_number() 
+              over(partition by category_name order by sales desc) 
+              as rank
+        from    
+            product_sales
+    )
+, mst_rank as (
+    select distinct rank
+    from product_sale_ranking
+)
+select
+    m.rank
+    , r1.product_id as dvd
+    , r1.sales as dvd_sales
+    , r2.product_id as cd
+    , r2.sales as cd_sales
+    , r3.product_id as book
+    , r3.sales as book_sales
+from
+    mst_rank as m
+    left outer join
+        product_sale_ranking as r1
+        on m.rank = r1.rank
+        and r1.category_name = 'dvd'
+    left outer join
+        product_sale_ranking as r2
+        on m.rank = r2.rank
+        and r2.category_name = 'cd'
+    left outer join
+        product_sale_ranking as r3
+        on m.rank = r3.rank
+        and r3.category_name = 'book'
+order by 
+    m.rank
+;
+
+
+```
+
+
+
+## 疑似的なテーブルの作成
+
+withはVALUESやINSERT文で作成することも可能です. これならば動的に1時テーブルを
+作成することが可能となります. 
+
+```{sql}
+set client_encoding = 'SJIS';
+with 
+mst_device(device_id, device_name)as (
+    values 
+        (1, 'PC')
+        , (2, 'SP')
+        , (3, 'アプリ')
+)
+select * 
+from mst_device
+;
+```
+
+
+ここまでは手動でテーブルを作成してきたが, 
+連番を自動生成するテーブル関数が実装されている. `generate_series`で
+シーケンシャルな連番を作成しよう. 
+
+
+```{sql}
+with
+series as (
+    select
+        generate_series(1, 5) as idx
+)
+select
+    * 
+from
+    series
+;
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
+```{r echo = FALSE, message = FALSE, warning = FALSE }
+dbDisconnect( con )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

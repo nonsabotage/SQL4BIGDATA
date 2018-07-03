@@ -1,0 +1,1073 @@
+---
+title: "Ch5 ユーザーを把握するためのデータ抽出"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        highlight: tango
+        theme: flatly
+        css: mycss.css
+        code_folding: show
+        include:
+            - in_header: in_head.html
+        df_print: "paged"
+  
+---
+
+
+# コネクションの設定
+
+```{r setup, message=FALSE}
+
+## load libs
+libs <- c( "DBI", "RPostgreSQL",  "purrr", "dplyr", "yaml" )
+for( lib in libs ) {
+    library( lib, character.only=TRUE )  
+} 
+
+## connection db
+config <-
+  read_yaml("config.yaml") %>%
+  update_list( drv =  ~  dbDriver(drv))
+con <- lift(dbConnect)(config)
+knitr::opts_chunk$set(connection = "con")
+```
+
+
+# ユーザー全体の特徴・傾向を見つける
+
+## サンプルデータ
+
+```{sql}
+select
+    *
+from
+    mst_users
+;
+```
+
+
+## ユーザーのアクション数を集計する
+`サービス内`の機能をどの程度利用しているのかを
+把握することで, userのふるまいを把握する. 
+
+
+### アクションに関する指標を集計する
+
+ある機能がある期間にどの程度使われたかを集計する.
+計算方針としてはユニークユーザー全体に対して, ある機能を使ったユニークユーザーが
+何%であるかを計算. 
+
+
+
+#### アクション数と割合を計算するクエリ
+```{sql}
+with
+stats as (
+    select 
+        count (distinct session) as total_uu
+    from
+        action_log
+)
+select
+    l.action
+    , count(distinct l.session) as action_uu
+    , count(1) as action_count
+    , s.total_uu
+    , 100. * count(distinct l.session) / s.total_uu as usage_rate
+    , 1. * count(1) / count(distinct l.session) as count_per_user
+from
+    action_log as l
+cross join
+    stats as s
+group by
+    l.action , s.total_uu
+;
+
+```
+
+
+
+### ログインユーザーと非ログインユーザーを分けて集計する
+
+
+非会員向けのサービスがある場合にはログインユーザーと, 
+非ログインユーザーの間で挙動が異なる. 
+
+#### ログイン状態を判別するクエリ
+
+```{sql}
+with
+action_log_with_status as (
+    select
+        session
+        , user_id
+        , action
+        , case when coalesce(user_id, '') <> '' then 'login' else 'guest' end
+          as login_status
+    from
+        action_log
+)
+select * 
+from
+    action_log_with_status
+;
+
+
+```
+
+
+rollupで小計付きのgroup byが可能であることを思い出そう. 小計の部分の属性水準は
+NULLになるのでcoalesceを使うことを忘れにしよう. 
+
+#### ログイン状態によるアクション数の集計クエリ
+
+
+```{sql}
+with 
+action_log_with_status as (
+    select
+        session
+        , user_id
+        , action
+        , case when coalesce(user_id, '') <> '' then 'login' else 'guest' end
+          as login_status
+    from
+        action_log    
+)
+select
+    coalesce(action, 'all') as action
+    , coalesce(login_status, 'all') as login_status
+    , count(distinct session) as action_uu
+    , count(1) as action_count
+from
+    action_log_with_status
+group by
+    rollup(action, login_status)
+order by
+    action_uu
+;
+```
+
+
+
+### 会員と非会員を分けて集計する
+
+
+```{sql}
+with
+action_log_with_status as (
+    select
+        session
+        , user_id
+        , action
+        , case 
+            when
+                coalesce(max(user_id)
+                    over(partition by session order by stamp
+                    rows between unbounded preceding and current row)
+                    , '') <> ''
+                then 'member'
+            else 'none'
+         end as member_status
+        , stamp
+    from
+        action_log
+)
+select
+    *
+from
+    action_log_with_status
+;
+```
+
+
+
+## 年齢別区分を集計する
+
+会員情報を保持するサービスではユーザーがどのような属性を持っているか, 
+想定したユーザーと異なるのかなどを確認する必要がある. 
+そのためにはユーザーの属性を定義する必要がある. 
+ここでは性別と年齢を考える.
+
+次のクエリでは生年月日を整数で保持している. 
+年齢を知るだけならこれで充分. 
+
+#### ユーザーの年齢を計算するクエリ
+
+```{sql}
+with
+mst_users_with_int_birth_date as (
+    select 
+        *
+        , 20170101 as int_specific_date
+        , cast(replace(substring(birth_date, 1, 10), '-', '') as integer ) as int_birth_date
+    from
+        mst_users
+)
+, mst_users_with_age as (
+    select
+        *
+        , floor((int_specific_date - int_birth_date) / 10000 ) as age
+    from
+        mst_users_with_int_birth_date
+)
+select
+    user_id, sex, birth_date, age
+from    
+    mst_users_with_age
+;
+```
+
+
+次のステップとしてカテゴリー分けをする.
+
+#### 性別と年齢から年齢区分を計算すうクエリ
+
+
+
+
+
+```{sql}
+with
+mst_users_with_int_birth_date as (
+    select 
+        *
+        , 20170101 as int_specific_date
+        , cast(replace(substring(birth_date, 1, 10), '-', '') as integer ) as int_birth_date
+    from
+        mst_users
+)
+, mst_users_with_age as (
+    select
+        *
+        , floor((int_specific_date - int_birth_date) / 10000 ) as age
+    from
+        mst_users_with_int_birth_date
+)
+, mst_users_with_category as (
+    select
+        user_id
+        , sex
+        , age
+        , concat(
+            case
+                when 20 <= age then sex
+                else ''
+            end
+            , case
+                when age between 4 and 12 then 'C'
+                when age between 13 and 19 then 'T'
+                when age between 20 and 34 then '1'
+                when age between 35 and 49 then '2'
+                when age >= 50 then '3'
+              end
+        ) as category
+    from
+        mst_users_with_age
+)
+select 
+    category 
+    , count( category ) as user_count
+from
+    mst_users_with_category
+group by
+    category
+;
+```
+
+## 年齢別区分ごとの特徴を抽出
+
+
+サービスの利用形態がユーザーの属性で異なることがわかれば, 
+商品や記事をユーザー属性に合わせて提示しやすくなる. 
+
+#### 年齢別区分とカテゴリを集計するクエリ
+
+
+```{sql}
+with
+mst_users_with_int_birth_date as (
+    select 
+        *
+        , 20170101 as int_specific_date
+        , cast(replace(substring(birth_date, 1, 10), '-', '') as integer ) as int_birth_date
+    from
+        mst_users
+)
+, mst_users_with_age as (
+    select
+        *
+        , floor((int_specific_date - int_birth_date) / 10000 ) as age
+    from
+        mst_users_with_int_birth_date
+)
+, mst_users_with_category as (
+    select
+        user_id
+        , sex
+        , age
+        , concat(
+            case
+                when 20 <= age then sex
+                else ''
+            end
+            , case
+                when age between 4 and 12 then 'C'
+                when age between 13 and 19 then 'T'
+                when age between 20 and 34 then '1'
+                when age between 35 and 49 then '2'
+                when age >= 50 then '3'
+              end
+        ) as category
+    from
+        mst_users_with_age
+)
+select 
+    p.category as product_category
+    , u.category as user_category
+    , count(*) as pruchase_count
+from
+    action_log as p
+    INNER JOIN
+        mst_users_with_category as u
+    ON 
+        p.user_id = u.user_id
+where
+    action = 'purchase'
+group by
+    p.category, u.category
+order by
+    p.category, u.category
+;
+```
+
+
+## ユーザーの訪問頻度を集計する
+
+ユーザーの属性は静的なものだけでなく, 現時点での訪問頻度など
+オンラインで変更されるものも有効. 
+
+
+#### 週に何日利用しているかを集計するクエリ
+```{sql}
+with
+action_log_with_dt as (
+    select 
+        *
+        , substring(stamp, 1, 10) as dt
+    from
+        action_log
+)
+, action_day_count_per_user as (
+    select
+        user_id
+        , count(distinct dt) as action_day_count
+    from
+        action_log_with_dt
+    where
+        dt between '2016-11-01' and '2016-11-07'
+    group by
+        user_id
+)
+select
+    action_day_count
+    , count(distinct user_id) as user_count
+from
+    action_day_count_per_user
+group by
+    action_day_count
+order by
+    action_day_count
+;
+
+
+
+```
+
+
+
+#### 構成比と構成比累計を計算するクエリ
+```{sql}
+with
+action_log_with_dt as (
+    select 
+        *
+        , substring(stamp, 1, 10) as dt
+    from
+        action_log
+)
+, action_day_count_per_user as (
+    select
+        user_id
+        , count(distinct dt) as action_day_count
+    from
+        action_log_with_dt
+    where
+        dt between '2016-11-01' and '2016-11-07'
+    group by
+        user_id
+)
+select
+    action_day_count
+    , count(distinct user_id) as user_count
+    , 100. * count(distinct user_id) / 
+      sum(count(distinct user_id)) over() as composition_ratio
+    , 100 * 
+      sum(count(distinct user_id))
+      over(order by action_day_count rows between unbounded preceding and current row) /
+      sum(count(distinct user_id)) 
+      over() as cumulative_ratio
+from
+    action_day_count_per_user
+group by
+    action_day_count
+order by
+    action_day_count
+;
+```
+
+
+
+## ベン図でユーザーのアクションを集計する
+
+複数の機能を提供している場合に, ユーザーがどの機能を
+使っているのかを考える. 
+
+#### 3つのアクションをベン図で表現した図
+
+```{sql}
+with
+user_action_flag as (
+    select
+        user_id
+        , sign(sum(case when action = 'purchase' then 1 else 0 end ) ) as has_purchase
+        , sign(sum(case when action = 'review' then 1 else 0 end ) ) as has_reviewe
+        , sign(sum(case when action = 'favorite' then 1 else 0 end ) ) as has_favorite
+    from
+        action_log
+    group by
+        user_id
+)
+select
+    *
+from
+    user_action_flag
+;
+```
+
+
+
+
+このクエリでは＆条件が考慮されていため, ベン図を描くには不十分である. 
+そこで`CUBE`句を使う. CUBE句ではべンずに必要な組み合わせがすべて出力される. 
+カラムの値がNAの部分はその部分の値を問わないという意味. 
+
+SNSなどでは次のようにアクションでユーザーが分類できる
+ 
+- 投稿をせずに閲覧をメインにおこなうユーザー
+- 投稿を積極的に行うユーザー
+- 投稿はしないがコメント機能を利用するユーザー
+- 投稿もコメントも積極的に使うユーザー
+
+```{sql}
+with
+user_action_flag as (
+    select
+        user_id
+        , sign(sum(case when action = 'purchase' then 1 else 0 end ) ) as has_purchase
+        , sign(sum(case when action = 'review' then 1 else 0 end ) ) as has_review
+        , sign(sum(case when action = 'favorite' then 1 else 0 end ) ) as has_favorite
+    from
+        action_log
+    group by
+        user_id
+)
+, action_venn_diagram as (
+    select 
+        has_purchase
+        , has_review
+        , has_favorite
+        , count(1) as users
+    from
+        user_action_flag
+    group by
+        cube(has_purchase, has_review, has_favorite)
+)
+select
+    *
+from
+    action_venn_diagram
+order by
+    has_purchase, has_review, has_favorite
+;
+```
+
+
+
+
+
+### デシル分析でユーザーを10檀家いのグループに分ける
+
+ABC分析の10段階版を, デシル分析という. 
+
+#### 購入額の多い順にユーザーグループを10分割するクエリ
+
+```{sql}
+with
+user_purchase_amount as (
+    select
+        user_id
+        , sum(amount) as purchase_amount
+    from
+        action_log
+    where
+        action = 'purchase'
+    group by
+        user_id
+)
+, users_with_decile as (
+    select 
+        user_id
+        , purchase_amount
+        , ntile(10) over (order by purchase_amount desc) as decile
+    from
+        user_purchase_amount
+)
+select * from users_with_decile;
+```
+
+上記のクエリに, グリー婦ごとの合計・平均購入金額と, 累計の購入金額, 全体の購入
+金額などの集約をおこなう. group by でデシルごとに集約して, 
+集約関数とウィンドウ関数を組みわせる. 
+
+#### 購入額の多い順にユーザーグループを10分割するクエリ
+
+```{sql}
+with
+user_purchase_amount as (
+    select
+        user_id
+        , sum(amount) as purchase_amount
+    from
+        action_log
+    where
+        action = 'purchase'
+    group by
+        user_id
+)
+, users_with_decile as (
+    select 
+        user_id
+        , purchase_amount
+        , ntile(10) over (order by purchase_amount desc) as decile
+    from
+        user_purchase_amount
+)
+, decile_with_purchase_amount as (
+    select
+        decile
+        , sum(purchase_amount) as amount
+        , avg(purchase_amount) as avg_amount
+        , sum(sum(purchase_amount)) over(order by decile) as cumulative_amount
+        , sum(sum(purchase_amount)) over() as total_amount
+    from
+        users_with_decile
+    group by
+        decile
+)
+select 
+    * 
+from
+    decile_with_purchase_amount
+;
+```
+
+
+### RFM分析でユーザーを3つの視点で分類する
+
+
+データ分析の対象期間が長くなると, 
+有料だが休眠状態など複数の状態が発生する. 
+短い場合にも優良顧客かどうかが判定できないなど
+多くの問題が発生する. 
+
+ここで紹介するRFM分析はデシル分析よりも
+ユーザーを細かく分類する手法である. 
+
+- R:Recency
+    - 最新購入日
+- F:Frequency
+    - 購入回数
+- M:Monetary
+    - 購入金額合計
+    
+#### ユーザー毎にRFMを集計するクエリ  
+```{sql}
+with
+purchase_log as (
+    select
+        user_id
+        , amount
+        , substring(stamp, 1, 10) as dt
+    from
+        action_log
+    where
+        action = 'purchase'
+)
+, user_rfm as (
+    select
+        user_id
+        , max(dt) as recent_date
+        , current_date - max(dt::date) as recency
+        , count(distinct dt) as frequency
+        , sum(amount) as monetary
+    from
+        purchase_log
+    group by
+        user_id
+)
+select
+    *
+from
+    user_rfm
+;
+```
+
+### RFMランクを定義する
+
+一般的にはRFMそれぞれ5分割, 全体で25グループにする. 
+
+
+#### ユーザー毎のRFMランクを計算するクエリ
+
+```{sql}
+with
+purchase_log as (
+    select
+        user_id
+        , amount
+        , substring(stamp, 1, 10) as dt
+    from
+        action_log
+    where
+        action = 'purchase'
+)
+, user_rfm as (
+    select
+        user_id
+        , max(dt) as recent_date
+        , current_date - max(dt::date) as recency
+        , count(distinct dt) as frequency
+        , sum(amount) as monetary
+    from
+        purchase_log
+    group by
+        user_id
+)
+, user_rfm_rank as (
+    select 
+        user_id
+        , recent_date
+        , recency
+        , frequency
+        , monetary
+        , case
+            when recency < 14 then 5
+            when recency < 28 then 4
+            when recency < 60 then 3
+            when recency < 90 then 2
+            else 1
+        end as r
+        , case
+            when 20 <= frequency then 5
+            when 10 <= frequency then 4
+            when 5  <= frequency then 3
+            when 2  <= frequency then 2
+            else 1
+        end as f
+        , case
+            when 300000 <= monetary then 5
+            when 100000 <= monetary then 4
+            when 30000  <= monetary then 3
+            when 5000   <= monetary then 2
+            else 1
+        end as m
+    from 
+        user_rfm
+)
+select 
+    *
+from
+    user_rfm_rank
+;
+```
+
+
+
+# ユーザー全体の時系列による状態変化を見つける
+
+ユーザーが休眠するか、ロイヤリティが高くなるのかを見極める。
+
+## サンプルデータ
+
+
+```{sql}
+select * from mst_users limit 3;
+```
+
+```{sql}
+select * from action_log limit 3;
+```
+
+
+
+## 登録数の推移と傾向をみる
+
+まずは登録数の変化を確認すること全体の活性状況を確認する。
+
+
+#### 日時で登録者数の推移を集計するクエリ
+
+```{sql}
+select
+    register_date
+    , count(distinct user_id) as register_count
+from 
+    mst_users
+group by
+    register_date
+order by
+    register_date
+;
+```
+
+
+次に月ごとに集約して先月比を比べてみる. 
+サンプルデータだと1月分しかデータがないので
+計算はエラーになる。
+
+#### 各月の登録数と先月比を計算するクエリ
+
+```{sql}
+with
+mst_users_with_year_month as (
+    select
+        *
+        , substring(register_date, 1, 7) as year_month
+    from
+        mst_users
+)
+select 
+    year_month
+    , count(distinct user_id) as register_count
+    , lag(count(distinct user_id)) over( order by year_month)
+        as last_month_count
+    , 1.0 * count(distinct user_id) / lag(count(distinct user_id)) over(order by year_month)
+        as month_over_month_ratio
+from 
+    mst_users_with_year_month
+group by
+    year_month
+;
+```
+
+
+### 登録デバイスの推移
+
+月ごとに集計した登録者数を、登録したレコード内に保持されている情報を利用して、
+その内訳を集計する。
+
+
+#### デバイスごとの登録者数を計算するクエリ
+```{sql}
+with
+mst_users_with_year_month as (
+    select
+        *
+        , substring(register_date, 1, 7) as year_month
+    from
+        mst_users
+)
+select 
+    year_month
+    , count(distinct user_id) as register_count
+    , count(distinct case when register_device = 'pc' then user_id end) as register_pc
+    , count(distinct case when register_device = 'sp' then user_id end) as register_sp
+    , count(distinct case when register_device = 'app' then user_id end) as register_app
+from 
+    mst_users_with_year_month
+group by
+    year_month
+;
+```
+
+
+
+
+
+### 5-2-2 継続率と定着率を算出
+
+ユーザーが利用してくれるだけでなく, 
+「継続的に利用してくれる」ことが重要である. 
+ここでは継続率と定着率を次ぎのように定義して, 
+ユーザーの継続性を把握する. 
+
+#### 定義
+
+
+> 継続率：登録日を基準として, その後の指定日においてユーザーの
+> サービス利用を示す指標
+
+> 定着率：登録日を基準として, その後の特定の7日間において, 
+> ユーザーのサービス利用を示す指標
+
+
+#### 日時の1日継続率推移
+
+
+```{sql}
+WITH
+action_log_with_mst_users as (
+  SELECT
+    u.user_id
+    , u.register_date
+    , CAST(a.stamp as date) as action_date
+    , MAX(CAST(a.stamp as date)) OVER() as latest_date
+    , CAST(u.register_date::date + '1 day'::interval as date)
+      as next_day_1
+  FROM
+    mst_users as u
+    LEFT OUTER JOIN 
+      action_log as a
+    ON u.user_id = a.user_id
+) 
+, user_action_flag as (
+  SELECT
+    user_id
+    , register_date
+    , SIGN(
+      SUM(
+        CASE WHEN next_day_1 <= latest_date THEN
+          CASE WHEN next_day_1 = action_date THEN 1 ELSE 0 END
+        END
+      )) as next_1_day_action
+  FROM
+    action_log_with_mst_users
+  GROUP BY
+    user_id, register_date
+)
+SELECT 
+  register_date
+  , AVG(100. * next_1_day_action) as repeat_rate_1_day
+FROM
+  user_action_flag
+GROUP BY
+  register_date
+ORDER BY
+  register_date
+;
+```
+
+
+#### 日時のn日継続率推移
+
+前述のクエリを繰り返すことで
+必要な継続率を得ることが可能であるが, ここでは
+一括処理する方法を示す. 
+
+```{sql}
+WITH
+repeat_interval(index_name, interval_date) as (
+VALUES
+  ('01 day repeat', 1)
+, ('02 day repeat', 2)
+, ('03 day repeat', 3)
+, ('04 day repeat', 4)
+, ('05 day repeat', 5)
+, ('06 day repeat', 6)
+, ('07 day repeat', 7)
+)
+, action_log_with_index_date as (
+SELECT
+  u.user_id
+  , u.register_date
+  , CAST(a.stamp as date) as action_date
+  , MAX(CAST(a.stamp as date)) OVER() as latest_date
+  , r.index_name
+  , CAST(CAST(u.register_date as date) + '1 day'::interval  * r.interval_date as date)
+    as index_date
+FROM
+  mst_users as u
+  LEFT OUTER JOIN
+    action_log as a
+  ON u.user_id = a.user_id
+  CROSS JOIN
+    repeat_interval as r
+)
+, user_action_flag as (
+SELECT 
+  user_id
+  , register_date
+  , index_name
+  , SIGN(
+    SUM(
+      CASE WHEN index_date <= latest_date THEN
+        CASE WHEN index_date = action_date THEN 1 ELSE 0 END
+      END
+    )
+  ) as index_date_action
+FROM
+  action_log_with_index_date
+GROUP BY
+  user_id, register_date, index_name, index_date
+)
+SELECT
+  register_date
+  , index_name
+  , AVG(100. * index_date_action) as repeat_rate
+FROM
+  user_action_flag
+GROUP BY 
+  register_date, index_name
+ORDER BY
+  register_date, index_name
+;
+;
+```
+
+
+
+
+### 継続率と定着に影響するアクションを集計
+
+```{sql}
+WITH
+repeat_interval(index_name, interval_begin_date, interval_end_date) as (
+  VALUES('01 day repeat', 1, 1)
+)
+, action_log_with_index_date as (
+SELECT
+  u.user_id
+  , u.register_date
+  , CAST(a.stamp as date) as action_date
+  , MAX(CAST(a.stamp as date)) OVER() as latest_date
+  , r.index_name
+  , CAST(u.register_date::date + '1 day'::interval * r.interval_begin_date as date) 
+      as index_begin_date
+  , CAST(u.register_date::date + '1 day'::interval * r.interval_end_date as date)
+      as index_end_date
+FROM
+  mst_users as u
+  LEFT OUTER JOIN
+    action_log as a
+  ON u.user_id = a.user_id
+  CROSS JOIN
+    repeat_interval as r
+)
+, user_action_flag as (
+SELECT 
+  user_id
+  , register_date
+  , index_name
+  , SIGN(
+    SUM(
+      CASE WHEN index_end_date <= latest_date THEN
+        CASE WHEN action_date BETWEEN index_begin_date AND index_end_date
+          THEN 1 ELSE 0 
+        END
+      END
+    )
+  ) as index_date_action
+FROM
+  action_log_with_index_date
+GROUP BY
+  user_id, register_date, index_name, index_begin_date, index_end_date
+)
+, mst_actions as(
+  SELECT 'view' as action
+  UNION ALL SELECT 'comment' as action
+  UNION ALL SELECT 'follow' as action
+)
+, mst_user_actions as (
+  SELECT
+    u.user_id
+    , u.register_date
+    , a.action
+  FROM
+    mst_users as u
+  CROSS JOIN
+    mst_actions as a
+)
+, register_action_flag as (
+SELECT DISTINCT
+  m.user_id
+  , m.register_date
+  , m.action
+  , CASE
+      WHEN a.action IS NOT NULL THEN 1
+      ELSE 0
+    END as do_action
+  , index_name
+  , index_date_action
+FROM
+  mst_user_actions as m
+LEFT OUTER JOIN
+  action_log as a
+  ON m.user_id = a.user_id
+  AND CAST(m.register_date as date) = CAST(a.stamp as date)
+  AND m.action = a.action
+LEFT OUTER JOIN
+  user_action_flag as f
+  ON m.user_id = f.user_id
+WHERE 
+  f.index_date_action is NOT NULL
+)
+SELECT 
+  action
+  , COUNT(1) as users 
+  , AVG(100. * do_action) as usage_rate
+  , index_name
+  , AVG(CASE do_action WHEN 1 THEN 100. * index_date_action END) as idx_rate
+  , AVG(CASE do_action WHEN 0 THEN 100. * index_date_action END) as no_action_idx_rate
+FROM
+  register_action_flag
+GROUP BY
+  index_name, action
+ORDER BY
+  index_name, action
+;
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r echo = FALSE, message = FALSE, warning = FALSE }
+dbDisconnect( con )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
