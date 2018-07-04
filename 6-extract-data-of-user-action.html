@@ -730,6 +730,8 @@ access_log_with_parse_info <span class="kw">AS</span> (
 <div id="cvr" class="section level3">
 <h3>流入元別にCVRを集計</h3>
 <p>CVR, つまり訪問に対して購入した割合を集計するクエリを記述する.</p>
+<div class="section level4">
+<h4>各訪問に対して購入した割合を集計するクエリ</h4>
 <div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
 access_log_with_parse_info <span class="kw">AS</span> (
   <span class="kw">SELECT</span> *
@@ -761,7 +763,7 @@ access_log_with_parse_info <span class="kw">AS</span> (
         <span class="kw">WHEN</span> p.stamp:<span class="ch">:date</span> <span class="kw">BETWEEN</span> a.stamp:<span class="ch">:date</span> <span class="kw">AND</span> a.stamp:<span class="ch">:date</span> + <span class="st">'1 day'</span>:<span class="ch">:interval</span>
         <span class="kw">THEN</span> amount
       <span class="kw">END</span>
-  ) <span class="kw">AS</span> amount <span class="co">-- postgresはinterval型の演算が可能</span>
+  ) <span class="kw">AS</span> amount <span class="co">-- postgresはinterval型の演算が可能で, 日付でフィルターをしてから, amountを修正</span>
   <span class="kw">FROM</span>
     access_log_with_via_info <span class="kw">AS</span> a
     <span class="kw">LEFT</span> <span class="kw">OUTER</span> <span class="kw">JOIN</span>
@@ -842,6 +844,636 @@ access_log_with_parse_info <span class="kw">AS</span> (
 <td align="right">0.00000</td>
 <td align="right">0</td>
 <td align="right">0</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
+<div class="section level2">
+<h2>アクセスされる曜日と時間帯</h2>
+<p>曜日とアクセスされる時間帯に ユーザーの特徴はサービスによって異なるため, ユーザー像を把握するための材料として利用できる.</p>
+<p>このレポートは次に2手順からなる.</p>
+<ul>
+<li>24時間の抽出したい単位を定める</li>
+<li>アクセスされた時価をその単位に丸める</li>
+<li>曜日と時間をキーにして集計する</li>
+</ul>
+<div class="section level4">
+<h4>曜日・時間帯別の訪問者数を集計するクエリ</h4>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+access_log_with_dow <span class="kw">AS</span>(
+  <span class="kw">SELECT</span> 
+    stamp
+    , date_part(<span class="st">'dow'</span>, stamp:<span class="ch">:timestamp</span>) <span class="kw">AS</span> dow <span class="co">-- 曜日番号を出力</span>
+    , <span class="fu">CAST</span>(substring(stamp, <span class="dv">12</span>, <span class="dv">2</span>) <span class="kw">AS</span> <span class="dt">int</span>) * <span class="dv">60</span> * <span class="dv">60</span>
+      + <span class="fu">CAST</span>(substring(stamp, <span class="dv">15</span>, <span class="dv">2</span>) <span class="kw">AS</span> <span class="dt">int</span>) * <span class="dv">60</span>
+      + <span class="fu">CAST</span>(substring(stamp, <span class="dv">18</span>, <span class="dv">2</span>) <span class="kw">AS</span> <span class="dt">int</span>) <span class="kw">AS</span> whole_seconds
+      
+      <span class="co">-- タイムスタンプを切り捨てる秒数を定義</span>
+      , <span class="dv">30</span> * <span class="dv">60</span> <span class="kw">AS</span> interval_seconds
+  <span class="kw">FROM</span> access_log
+)
+, access_log_with_floor_seconds <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> 
+    stamp
+    , dow
+    <span class="co">-- interval_timeで丸める処理</span>
+    , <span class="fu">CAST</span>((<span class="fu">floor</span>(whole_seconds / interval_seconds) * interval_seconds) <span class="kw">AS</span> <span class="dt">int</span>)
+      <span class="kw">AS</span> floor_seconds
+  <span class="kw">FROM</span> access_log_with_dow
+)
+, access_log_with_index <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    stamp
+    , dow
+    <span class="co">-- 総秒数からタイムスタンプの時刻表記に変換</span>
+    <span class="co">-- lpaは左詰めの関数</span>
+    , <span class="fu">lpad</span>(<span class="fu">floor</span>(floor_seconds / (<span class="dv">60</span> * <span class="dv">60</span>)):<span class="ch">:text</span>, <span class="dv">2</span>, <span class="st">'0'</span>) || <span class="st">':'</span>
+      || <span class="fu">lpad</span>(<span class="fu">floor</span>(floor_seconds % (<span class="dv">60</span> * <span class="dv">60</span>) / <span class="dv">60</span>):<span class="ch">:text</span>, <span class="dv">2</span>, <span class="st">'0'</span>) || <span class="st">':'</span>
+      || <span class="fu">lpad</span>(<span class="fu">floor</span>(floor_seconds % <span class="dv">60</span>):<span class="ch">:text</span>, <span class="dv">2</span>, <span class="st">'0'</span>) 
+      <span class="kw">AS</span> index_time
+    <span class="kw">FROM</span> access_log_with_floor_seconds
+)
+<span class="kw">SELECT</span>
+  index_time
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">0</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> sun
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">1</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> mon
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">2</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> tue
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">3</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> wed <span class="co">-- dow が 3のときの1列目, という意味</span>
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">4</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> thu
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">5</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> fri
+  , <span class="fu">COUNT</span>(<span class="kw">CASE</span> dow <span class="kw">WHEN</span> <span class="dv">6</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">END</span>) <span class="kw">AS</span> sat
+<span class="kw">FROM</span>
+  access_log_with_index
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  index_time
+<span class="kw">ORDER</span> <span class="kw">BY</span>
+  index_time
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>7 records</caption>
+<thead>
+<tr class="header">
+<th align="left">index_time</th>
+<th align="right">sun</th>
+<th align="right">mon</th>
+<th align="right">tue</th>
+<th align="right">wed</th>
+<th align="right">thu</th>
+<th align="right">fri</th>
+<th align="right">sat</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">12:00:00</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">13:00:00</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">2</td>
+</tr>
+<tr class="odd">
+<td align="left">14:00:00</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">15:00:00</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">16:00:00</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">17:00:00</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">18:00:00</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">1</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
+<div class="section level1">
+<h1>サイト内のユーザーの行動</h1>
+<p>Ｗｅｂサイトでの特徴的な指標, たとえば 訪問者数や訪問回数, 直帰率, 離脱率を作成するＳＱＬを作成する.</p>
+<div id="-1" class="section level2">
+<h2>サンプルデータ</h2>
+<p>転職サイトにおけるアクションログで, 検索タイプを含んでいる.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">SELECT</span> * 
+<span class="kw">FROM</span> activity_log;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>Displaying records 1 - 10</caption>
+<thead>
+<tr class="header">
+<th align="left">stamp</th>
+<th align="left">session</th>
+<th align="left">action</th>
+<th align="left">option</th>
+<th align="left">path</th>
+<th align="left">search_type</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">989004ea</td>
+<td align="left">view</td>
+<td align="left">search</td>
+<td align="left">/search_list</td>
+<td align="left">Area-L-with-Job</td>
+</tr>
+<tr class="even">
+<td align="left">2017-01-09 12:19:27</td>
+<td align="left">989004ea</td>
+<td align="left">view</td>
+<td align="left">page</td>
+<td align="left">/search_input</td>
+<td align="left"></td>
+</tr>
+<tr class="odd">
+<td align="left">2017-01-09 12:20:03</td>
+<td align="left">989004ea</td>
+<td align="left">view</td>
+<td align="left">search</td>
+<td align="left">/search_list</td>
+<td align="left">Pref</td>
+</tr>
+<tr class="even">
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">47db0370</td>
+<td align="left">view</td>
+<td align="left">search</td>
+<td align="left">/search_list</td>
+<td align="left">Area-S</td>
+</tr>
+<tr class="odd">
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">1cf7678e</td>
+<td align="left">view</td>
+<td align="left">detail</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left">2017-01-09 12:19:04</td>
+<td align="left">1cf7678e</td>
+<td align="left">view</td>
+<td align="left">page</td>
+<td align="left">/</td>
+<td align="left"></td>
+</tr>
+<tr class="odd">
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">5eb2e107</td>
+<td align="left">view</td>
+<td align="left">detail</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">fe05e1d8</td>
+<td align="left">view</td>
+<td align="left">detail</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+</tr>
+<tr class="odd">
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">87b5725f</td>
+<td align="left">view</td>
+<td align="left">detail</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left">2017-01-09 12:20:22</td>
+<td align="left">87b5725f</td>
+<td align="left">view</td>
+<td align="left">search</td>
+<td align="left">/search_list</td>
+<td align="left">Line</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level2">
+<h2>入口ページと出口ページ</h2>
+<p>最初にアクセスしたページを入り口ページという. 逆に最後にアクセスし, 離脱をしたページを出口ページという.</p>
+<div class="section level3">
+<h3>集計</h3>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span> 
+activity_log_with_landing_exit <span class="kw">AS</span>(
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , path
+    , stamp
+    , <span class="fu">FIRST_VALUE</span>(path)
+        <span class="kw">OVER</span>(
+          <span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>
+          <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>
+            <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> 
+                     <span class="kw">AND</span> <span class="kw">UNBOUNDED</span> <span class="kw">FOLLOWING</span>
+        ) <span class="kw">AS</span> landing
+    , <span class="fu">LAST_VALUE</span>(path)
+        <span class="kw">OVER</span>(
+          <span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>
+          <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>
+            <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span>
+                     <span class="kw">AND</span> <span class="kw">UNBOUNDED</span> <span class="kw">FOLLOWING</span>
+        ) <span class="kw">AS</span> exit
+  <span class="kw">FROM</span> activity_log
+)
+, landing_count <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    landing <span class="kw">AS</span> path
+    , <span class="fu">COUNT</span>(<span class="kw">DISTINCT</span> <span class="kw">session</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  <span class="kw">FROM</span>
+    activity_log_with_landing_exit
+  <span class="kw">GROUP</span> <span class="kw">BY</span>
+    landing
+)
+, exit_count <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    exit <span class="kw">AS</span> path
+    , <span class="fu">COUNT</span>(<span class="kw">DISTINCT</span> <span class="kw">session</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  <span class="kw">FROM</span>
+    activity_log_with_landing_exit
+  <span class="kw">GROUP</span> <span class="kw">BY</span> exit
+)
+<span class="kw">SELECT</span> <span class="st">'landing'</span> <span class="kw">AS</span> <span class="kw">type</span>, * <span class="kw">FROM</span> landing_count
+<span class="kw">UNION</span> <span class="kw">ALL</span>
+<span class="kw">SELECT</span> <span class="st">'exit'</span> <span class="kw">AS</span> <span class="kw">type</span>, * <span class="kw">FROM</span> exit_count
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>8 records</caption>
+<thead>
+<tr class="header">
+<th align="left">type</th>
+<th align="left">path</th>
+<th align="right">count</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">landing</td>
+<td align="left">/detail</td>
+<td align="right">8</td>
+</tr>
+<tr class="even">
+<td align="left">landing</td>
+<td align="left">/search_input</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">landing</td>
+<td align="left">/search_list</td>
+<td align="right">7</td>
+</tr>
+<tr class="even">
+<td align="left">exit</td>
+<td align="left">/</td>
+<td align="right">2</td>
+</tr>
+<tr class="odd">
+<td align="left">exit</td>
+<td align="left">/complete</td>
+<td align="right">2</td>
+</tr>
+<tr class="even">
+<td align="left">exit</td>
+<td align="left">/detail</td>
+<td align="right">7</td>
+</tr>
+<tr class="odd">
+<td align="left">exit</td>
+<td align="left">/search_input</td>
+<td align="right">2</td>
+</tr>
+<tr class="even">
+<td align="left">exit</td>
+<td align="left">/search_list</td>
+<td align="right">3</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level3">
+<h3>どこから開始してどこで離脱するか</h3>
+<p>Webサイトはトップページから閲覧を開始するとは 限らないため, どこから閲覧を開始している情報を取得するのは, サイトの改善に役立つ.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span> 
+activity_log_with_landing_exit <span class="kw">AS</span>(
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , path
+    , stamp
+    , <span class="fu">FIRST_VALUE</span>(path)
+        <span class="kw">OVER</span>(
+          <span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>
+          <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>
+            <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> 
+                     <span class="kw">AND</span> <span class="kw">UNBOUNDED</span> <span class="kw">FOLLOWING</span>
+        ) <span class="kw">AS</span> landing
+    , <span class="fu">LAST_VALUE</span>(path)
+        <span class="kw">OVER</span>(
+          <span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>
+          <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>
+            <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span>
+                     <span class="kw">AND</span> <span class="kw">UNBOUNDED</span> <span class="kw">FOLLOWING</span>
+        ) <span class="kw">AS</span> exit
+  <span class="kw">FROM</span> activity_log
+)
+<span class="kw">SELECT</span> 
+  landing
+  , exit
+  , <span class="fu">COUNT</span>(<span class="kw">DISTINCT</span> <span class="kw">session</span>) <span class="kw">AS</span> <span class="fu">count</span>
+<span class="kw">FROM</span>
+  activity_log_with_landing_exit
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  landing, exit
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>7 records</caption>
+<thead>
+<tr class="header">
+<th align="left">landing</th>
+<th align="left">exit</th>
+<th align="right">count</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">/detail</td>
+<td align="left">/</td>
+<td align="right">2</td>
+</tr>
+<tr class="even">
+<td align="left">/detail</td>
+<td align="left">/detail</td>
+<td align="right">6</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_input</td>
+<td align="left">/search_input</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">/search_list</td>
+<td align="left">/complete</td>
+<td align="right">2</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_list</td>
+<td align="left">/detail</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">/search_list</td>
+<td align="left">/search_input</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_list</td>
+<td align="left">/search_list</td>
+<td align="right">3</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<div class="section level2">
+<h2>離脱率と直帰率</h2>
+<p>出口ページの離脱率を求めることで, 問題となるページを洗い出す琴が目的となる.</p>
+<div class="section level3">
+<h3>離脱率の集計</h3>
+<blockquote>
+<p>離脱率 = 出口数　/ ページビュー</p>
+</blockquote>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql">
+<span class="kw">WITH</span>
+activity_log_with_exit_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    *
+    <span class="co">-- 出口ページ判定, sessionのお尻を探している</span>
+    , <span class="kw">CASE</span> 
+        <span class="kw">WHEN</span> <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>) = <span class="dv">1</span> <span class="kw">THEN</span> <span class="dv">1</span>
+        <span class="kw">ELSE</span> <span class="dv">0</span>
+      <span class="kw">END</span> <span class="kw">AS</span> is_exit
+  <span class="kw">FROM</span>
+    activity_log
+)
+<span class="kw">SELECT</span>
+  path
+  , <span class="fu">SUM</span>(is_exit) <span class="kw">AS</span> exit_count
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> page_view
+  , <span class="fu">AVG</span>(<span class="dv">100</span>. * is_exit) <span class="kw">AS</span> exit_ratio
+<span class="kw">FROM</span>
+  activity_log_with_exit_flag
+<span class="kw">GROUP</span> <span class="kw">BY</span> path
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>7 records</caption>
+<thead>
+<tr class="header">
+<th align="left">path</th>
+<th align="right">exit_count</th>
+<th align="right">page_view</th>
+<th align="right">exit_ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">/detail</td>
+<td align="right">7</td>
+<td align="right">11</td>
+<td align="right">63.63636</td>
+</tr>
+<tr class="even">
+<td align="left">/confirm</td>
+<td align="right">0</td>
+<td align="right">2</td>
+<td align="right">0.00000</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_input</td>
+<td align="right">2</td>
+<td align="right">5</td>
+<td align="right">40.00000</td>
+</tr>
+<tr class="even">
+<td align="left">/</td>
+<td align="right">2</td>
+<td align="right">4</td>
+<td align="right">50.00000</td>
+</tr>
+<tr class="odd">
+<td align="left">/complete</td>
+<td align="right">2</td>
+<td align="right">2</td>
+<td align="right">100.00000</td>
+</tr>
+<tr class="even">
+<td align="left">/input</td>
+<td align="right">0</td>
+<td align="right">2</td>
+<td align="right">0.00000</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_list</td>
+<td align="right">3</td>
+<td align="right">10</td>
+<td align="right">30.00000</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level3">
+<h3>直帰率</h3>
+<blockquote>
+<p>直帰率 = 1ページだけ閲覧された訪問回数 / 入り口数</p>
+</blockquote>
+<p>または</p>
+<blockquote>
+<p>直帰率 = 1ページだけ閲覧された訪問回数 / 訪問回数</p>
+</blockquote>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+activity_log_with_landing_bounce_flag <span class="kw">AS</span> (
+<span class="kw">SELECT</span> 
+  *
+  <span class="co">-- 入り口ページ判定</span>
+  , <span class="kw">CASE</span> 
+      <span class="kw">WHEN</span> <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) = <span class="dv">1</span> <span class="kw">THEN</span> <span class="dv">1</span>
+      <span class="kw">ELSE</span> <span class="dv">0</span>
+    <span class="kw">END</span> <span class="kw">AS</span> is_landing
+  <span class="co">-- 直帰判定</span>
+  , <span class="kw">CASE</span>
+      <span class="kw">WHEN</span> <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) = <span class="dv">1</span> <span class="kw">THEN</span> <span class="dv">1</span>
+      <span class="kw">ELSE</span> <span class="dv">0</span>
+    <span class="kw">END</span> <span class="kw">AS</span> is_bounce
+<span class="kw">FROM</span>
+  activity_log
+)
+<span class="kw">SELECT</span>
+  path
+  , <span class="fu">SUM</span>(is_bounce) <span class="kw">AS</span> bounce_count
+  , <span class="fu">SUM</span>(is_landing) <span class="kw">AS</span> landing_count
+  , <span class="fu">AVG</span>(<span class="dv">100</span>. * <span class="kw">CASE</span> <span class="kw">WHEN</span> is_landing = <span class="dv">1</span> <span class="kw">THEN</span> is_bounce <span class="kw">END</span>) <span class="kw">AS</span> bounce_ratio
+<span class="kw">FROM</span>
+  activity_log_with_landing_bounce_flag
+<span class="kw">GROUP</span> <span class="kw">BY</span> path
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>7 records</caption>
+<thead>
+<tr class="header">
+<th align="left">path</th>
+<th align="right">bounce_count</th>
+<th align="right">landing_count</th>
+<th align="right">bounce_ratio</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">/detail</td>
+<td align="right">6</td>
+<td align="right">8</td>
+<td align="right">75.00000</td>
+</tr>
+<tr class="even">
+<td align="left">/confirm</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_input</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">100.00000</td>
+</tr>
+<tr class="even">
+<td align="left">/</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+</tr>
+<tr class="odd">
+<td align="left">/complete</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+</tr>
+<tr class="even">
+<td align="left">/input</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_list</td>
+<td align="right">2</td>
+<td align="right">7</td>
+<td align="right">28.57143</td>
 </tr>
 </tbody>
 </table>

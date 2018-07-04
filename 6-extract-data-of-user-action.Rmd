@@ -292,10 +292,341 @@ ORDER BY cvr DESC
 ```
 
 
+## アクセスされる曜日と時間帯
+
+曜日とアクセスされる時間帯に
+ユーザーの特徴はサービスによって異なるため, 
+ユーザー像を把握するための材料として利用できる. 
+
+このレポートは次に2手順からなる. 
+
+- 24時間の抽出したい単位を定める
+- アクセスされた時価をその単位に丸める
+- 曜日と時間をキーにして集計する
+
+#### 曜日・時間帯別の訪問者数を集計するクエリ
+
+```{sql}
+WITH
+access_log_with_dow AS(
+  SELECT 
+    stamp
+    , date_part('dow', stamp::timestamp) AS dow -- 曜日番号を出力
+    , CAST(substring(stamp, 12, 2) AS int) * 60 * 60
+      + CAST(substring(stamp, 15, 2) AS int) * 60
+      + CAST(substring(stamp, 18, 2) AS int) AS whole_seconds
+      
+      -- タイムスタンプを切り捨てる秒数を定義
+      , 30 * 60 AS interval_seconds
+  FROM access_log
+)
+, access_log_with_floor_seconds AS (
+  SELECT 
+    stamp
+    , dow
+    -- interval_timeで丸める処理
+    , CAST((floor(whole_seconds / interval_seconds) * interval_seconds) AS int)
+      AS floor_seconds
+  FROM access_log_with_dow
+)
+, access_log_with_index AS (
+  SELECT
+    stamp
+    , dow
+    -- 総秒数からタイムスタンプの時刻表記に変換
+    -- lpaは左詰めの関数
+    , lpad(floor(floor_seconds / (60 * 60))::text, 2, '0') || ':'
+      || lpad(floor(floor_seconds % (60 * 60) / 60)::text, 2, '0') || ':'
+      || lpad(floor(floor_seconds % 60)::text, 2, '0') 
+      AS index_time
+    FROM access_log_with_floor_seconds
+)
+SELECT
+  index_time
+  , COUNT(CASE dow WHEN 0 THEN 1 END) AS sun
+  , COUNT(CASE dow WHEN 1 THEN 1 END) AS mon
+  , COUNT(CASE dow WHEN 2 THEN 1 END) AS tue
+  , COUNT(CASE dow WHEN 3 THEN 1 END) AS wed -- dow が 3のときの1列目, という意味
+  , COUNT(CASE dow WHEN 4 THEN 1 END) AS thu
+  , COUNT(CASE dow WHEN 5 THEN 1 END) AS fri
+  , COUNT(CASE dow WHEN 6 THEN 1 END) AS sat
+FROM
+  access_log_with_index
+GROUP BY
+  index_time
+ORDER BY
+  index_time
+;
+```
+
+# サイト内のユーザーの行動
+
+Ｗｅｂサイトでの特徴的な指標, たとえば
+訪問者数や訪問回数, 直帰率, 離脱率を作成するＳＱＬを作成する. 
+
+
+## サンプルデータ
+
+転職サイトにおけるアクションログで, 検索タイプを含んでいる.
+
+```{sql}
+SELECT * 
+FROM activity_log;
+```
 
 
 
 
+## 入口ページと出口ページ
+
+最初にアクセスしたページを入り口ページという. 逆に最後にアクセスし, 
+離脱をしたページを出口ページという. 
+
+### 集計
+
+
+```{sql}
+WITH 
+activity_log_with_landing_exit AS(
+  SELECT
+    session
+    , path
+    , stamp
+    , FIRST_VALUE(path)
+        OVER(
+          PARTITION BY session
+          ORDER BY stamp ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING 
+                     AND UNBOUNDED FOLLOWING
+        ) AS landing
+    , LAST_VALUE(path)
+        OVER(
+          PARTITION BY session
+          ORDER BY stamp ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING
+                     AND UNBOUNDED FOLLOWING
+        ) AS exit
+  FROM activity_log
+)
+, landing_count AS (
+  SELECT
+    landing AS path
+    , COUNT(DISTINCT session) AS count
+  FROM
+    activity_log_with_landing_exit
+  GROUP BY
+    landing
+)
+, exit_count AS (
+  SELECT
+    exit AS path
+    , COUNT(DISTINCT session) AS count
+  FROM
+    activity_log_with_landing_exit
+  GROUP BY exit
+)
+SELECT 'landing' AS type, * FROM landing_count
+UNION ALL
+SELECT 'exit' AS type, * FROM exit_count
+;
+
+```
+
+
+
+### どこから開始してどこで離脱するか
+
+Webサイトはトップページから閲覧を開始するとは
+限らないため, どこから閲覧を開始している情報を取得するのは, 
+サイトの改善に役立つ. 
+
+
+```{sql}
+WITH 
+activity_log_with_landing_exit AS(
+  SELECT
+    session
+    , path
+    , stamp
+    , FIRST_VALUE(path)
+        OVER(
+          PARTITION BY session
+          ORDER BY stamp ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING 
+                     AND UNBOUNDED FOLLOWING
+        ) AS landing
+    , LAST_VALUE(path)
+        OVER(
+          PARTITION BY session
+          ORDER BY stamp ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING
+                     AND UNBOUNDED FOLLOWING
+        ) AS exit
+  FROM activity_log
+)
+SELECT 
+  landing
+  , exit
+  , COUNT(DISTINCT session) AS count
+FROM
+  activity_log_with_landing_exit
+GROUP BY
+  landing, exit
+;
+```
+
+
+## 離脱率と直帰率
+
+
+出口ページの離脱率を求めることで, 
+問題となるページを洗い出す琴が目的となる. 
+
+
+### 離脱率の集計
+
+> 離脱率 = 出口数　/ ページビュー
+
+```{sql}
+
+WITH
+activity_log_with_exit_flag AS (
+  SELECT
+    *
+    -- 出口ページ判定, sessionのお尻を探している
+    , CASE 
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) = 1 THEN 1
+        ELSE 0
+      END AS is_exit
+  FROM
+    activity_log
+)
+SELECT
+  path
+  , SUM(is_exit) AS exit_count
+  , COUNT(1) AS page_view
+  , AVG(100. * is_exit) AS exit_ratio
+FROM
+  activity_log_with_exit_flag
+GROUP BY path
+;
+
+
+
+```
+
+
+
+### 直帰率
+
+> 直帰率 = 1ページだけ閲覧された訪問回数 / 入り口数
+
+または
+
+> 直帰率 = 1ページだけ閲覧された訪問回数 / 訪問回数
+
+```{sql}
+WITH
+activity_log_with_landing_bounce_flag AS (
+SELECT 
+  *
+  -- 入り口ページ判定
+  , CASE 
+      WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) = 1 THEN 1
+      ELSE 0
+    END AS is_landing
+  -- 直帰判定
+  , CASE
+      WHEN COUNT(1) OVER(PARTITION BY session) = 1 THEN 1
+      ELSE 0
+    END AS is_bounce
+FROM
+  activity_log
+)
+SELECT
+  path
+  , SUM(is_bounce) AS bounce_count
+  , SUM(is_landing) AS landing_count
+  , AVG(100. * CASE WHEN is_landing = 1 THEN is_bounce END) AS bounce_ratio
+FROM
+  activity_log_with_landing_bounce_flag
+GROUP BY path
+;
+```
+
+
+
+## 成果に結びつくページを把握
+
+より成果に結びつくページに誘導した方が
+Webサイト全体のCVRが向上する. 例えば
+検索機能がついているならば, 成果が大きい方を優先して
+表示させるなどが考えれる. 
+
+
+### コンバージョンしたページより前のアクセスにフラグを立てるクエリ
+```{sql}
+WITH
+activity_log_with_conversion_flag AS (
+  SELECT
+    session
+    , stamp
+    , path
+    -- ここ
+    , SIGN(SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+           OVER(PARTITION BY session ORDER BY stamp DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      ) AS has_conversion
+  FROM 
+    activity_log
+)
+SELECT * 
+FROM
+  activity_log_with_conversion_flag
+ORDER BY 
+  session, stamp
+;
+```
+
+
+```{sql}
+WITH 
+activity_log_with_landing_exit AS(
+  SELECT
+    session
+    , path
+    , stamp
+    , FIRST_VALUE(path)
+        OVER(
+          PARTITION BY session
+          ORDER BY stamp ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING 
+                     AND UNBOUNDED FOLLOWING
+        ) AS landing
+    , LAST_VALUE(path)
+        OVER(
+          PARTITION BY session
+          ORDER BY stamp ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING
+                     AND UNBOUNDED FOLLOWING
+        ) AS exit
+  FROM activity_log
+)
+SELECT
+  path
+  , COUNT(DISTINCT session) AS sessions
+  , SUM(has_conversion) AS conversions
+  , 1. * SUM(has_conversion) / COUNT(DISTINCT session) AS cvr
+FROM
+  activity_log_with_conversion_flag
+GROUP BY
+  path
+;
+```
+
+
+商品購入や資料請求の場面でCVRは高くなるため, 
+CVRを比較するときには同じ階層や類似コンテンツの場合とする.
 
 
 
