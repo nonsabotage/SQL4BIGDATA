@@ -591,26 +591,18 @@ ORDER BY
 
 ```{sql}
 WITH 
-activity_log_with_landing_exit AS(
+activity_log_with_conversion_flag AS (
   SELECT
     session
-    , path
     , stamp
-    , FIRST_VALUE(path)
-        OVER(
-          PARTITION BY session
-          ORDER BY stamp ASC
-            ROWS BETWEEN UNBOUNDED PRECEDING 
-                     AND UNBOUNDED FOLLOWING
-        ) AS landing
-    , LAST_VALUE(path)
-        OVER(
-          PARTITION BY session
-          ORDER BY stamp ASC
-            ROWS BETWEEN UNBOUNDED PRECEDING
-                     AND UNBOUNDED FOLLOWING
-        ) AS exit
-  FROM activity_log
+    , path
+    -- ここ
+    , SIGN(SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+           OVER(PARTITION BY session ORDER BY stamp DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      ) AS has_conversion
+  FROM 
+    activity_log
 )
 SELECT
   path

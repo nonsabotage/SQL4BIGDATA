@@ -1480,6 +1480,190 @@ activity_log_with_landing_bounce_flag <span class="kw">AS</span> (
 </div>
 </div>
 </div>
+<div class="section level2">
+<h2>成果に結びつくページを把握</h2>
+<p>より成果に結びつくページに誘導した方が Webサイト全体のCVRが向上する. 例えば 検索機能がついているならば, 成果が大きい方を優先して 表示させるなどが考えれる.</p>
+<div class="section level3">
+<h3>コンバージョンしたページより前のアクセスにフラグを立てるクエリ</h3>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+activity_log_with_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    <span class="co">-- ここ</span>
+    , <span class="fu">SIGN</span>(<span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+           <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>
+              <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+      ) <span class="kw">AS</span> has_conversion
+  <span class="kw">FROM</span> 
+    activity_log
+)
+<span class="kw">SELECT</span> * 
+<span class="kw">FROM</span>
+  activity_log_with_conversion_flag
+<span class="kw">ORDER</span> <span class="kw">BY</span> 
+  <span class="kw">session</span>, stamp
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>Displaying records 1 - 10</caption>
+<thead>
+<tr class="header">
+<th align="left">session</th>
+<th align="left">stamp</th>
+<th align="left">path</th>
+<th align="right">has_conversion</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">0fe39581</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:19:11</td>
+<td align="left">/search_input</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:20:10</td>
+<td align="left">/</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:21:14</td>
+<td align="left">/search_input</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">1cf7678e</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/detail</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">1cf7678e</td>
+<td align="left">2017-01-09 12:19:04</td>
+<td align="left">/</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">36dd0df7</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">36dd0df7</td>
+<td align="left">2017-01-09 12:19:49</td>
+<td align="left">/detail</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">3efe001c</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/detail</td>
+<td align="right">0</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span> 
+activity_log_with_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    <span class="co">-- ここ</span>
+    , <span class="fu">SIGN</span>(<span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+           <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>
+              <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+      ) <span class="kw">AS</span> has_conversion
+  <span class="kw">FROM</span> 
+    activity_log
+)
+<span class="kw">SELECT</span>
+  path
+  , <span class="fu">COUNT</span>(<span class="kw">DISTINCT</span> <span class="kw">session</span>) <span class="kw">AS</span> sessions
+  , <span class="fu">SUM</span>(has_conversion) <span class="kw">AS</span> conversions
+  , <span class="dv">1</span>. * <span class="fu">SUM</span>(has_conversion) / <span class="fu">COUNT</span>(<span class="kw">DISTINCT</span> <span class="kw">session</span>) <span class="kw">AS</span> cvr
+<span class="kw">FROM</span>
+  activity_log_with_conversion_flag
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  path
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>7 records</caption>
+<thead>
+<tr class="header">
+<th align="left">path</th>
+<th align="right">sessions</th>
+<th align="right">conversions</th>
+<th align="right">cvr</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">/</td>
+<td align="right">3</td>
+<td align="right">0</td>
+<td align="right">0.00</td>
+</tr>
+<tr class="even">
+<td align="left">/complete</td>
+<td align="right">2</td>
+<td align="right">2</td>
+<td align="right">1.00</td>
+</tr>
+<tr class="odd">
+<td align="left">/confirm</td>
+<td align="right">2</td>
+<td align="right">2</td>
+<td align="right">1.00</td>
+</tr>
+<tr class="even">
+<td align="left">/detail</td>
+<td align="right">10</td>
+<td align="right">1</td>
+<td align="right">0.10</td>
+</tr>
+<tr class="odd">
+<td align="left">/input</td>
+<td align="right">2</td>
+<td align="right">2</td>
+<td align="right">1.00</td>
+</tr>
+<tr class="even">
+<td align="left">/search_input</td>
+<td align="right">4</td>
+<td align="right">0</td>
+<td align="right">0.00</td>
+</tr>
+<tr class="odd">
+<td align="left">/search_list</td>
+<td align="right">8</td>
+<td align="right">2</td>
+<td align="right">0.25</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>商品購入や資料請求の場面でCVRは高くなるため, CVRを比較するときには同じ階層や類似コンテンツの場合とする.</p>
+</div>
+</div>
 </div>
 <div class="section level1">
 <h1>コネクションの削除</h1>
