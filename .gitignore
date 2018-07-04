@@ -3,3 +3,5 @@
 doc/*
 sql/*
 config.yaml
+*.RData
+*.Rhistory
