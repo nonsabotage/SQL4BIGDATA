@@ -621,6 +621,407 @@ GROUP BY
 CVRを比較するときには同じ階層や類似コンテンツの場合とする.
 
 
+## ページの価値を算出する
+
+売り上げに結びつかないページを回遊させるよりも, 
+より成果に結びつくページへの回遊を増やすことは
+上等手段である. 
+
+ページの価値を算出するには「**何を成果の数値とするのか**」と
+「**何を評価したいのか**」を決める
+
+### ページの価値を集計する準備
+
+ページに価値を与えるロジックはいろいろある. 
+
+- 最初のページに割り当てる
+- 最後のページに割り当てる
+- 均等に分配する
+- 成果地点から近いページにより高く割り当てる
+- 成果地点から遠いページにより高く割り当てる
+
+### 任意の階級でヒストグラム
+
+```{sql}
+WITH 
+activity_log_with_conversion_flag AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , SIGN(SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+           OVER(PARTITION BY session ORDER BY stamp DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      ) AS has_conversion
+  FROM 
+    activity_log
+)
+, activity_log_with_conversion_assign AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) AS asc_order
+    , ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) AS desc_order
+    , COUNT(1) OVER(PARTITION BY session) AS page_count
+    
+    -- 1. コンバージョンに至るアクセスログに均等に価値を振る
+    , 1000. / COUNT(1) OVER(PARTITION BY session) AS fair_assign
+    -- 2. コンバージョンに至るアクセスログの最初のページに価値を振る
+    , CASE
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) = 1
+          THEN 1000.
+        ELSE 0.
+      END AS first_assign
+    --3. コンバージョンに至るアクセスログの最後のページに価値を割り振る
+    , CASE
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) = 1
+          THEN 1000.
+        ELSE 0.
+      END AS last_assign
+    --4成果地点から近いページにより高く割り合る
+    --連番の和の公式を使う
+    , 1000.
+      * ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC )
+      / (
+        COUNT(1) OVER(PARTITION BY session) 
+        * (COUNT(1) OVER(PARTITION BY session) + 1) 
+        / 2
+      ) AS decrease_assign
+    -- 5成果地点から遠いページによｒ高く割り当てる
+    , 1000. 
+      * ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC)
+      / (
+        COUNT(1) OVER(PARTITION BY session )
+        * (COUNT(1) OVER(PARTITION BY session) + 1)
+        / 2
+      ) AS increase_assign
+  FROM activity_log_with_conversion_flag
+  WHERE
+    has_conversion = 1
+    AND path NOT IN ('/input', '/confirm', '/complete')
+)
+SELECT
+  session
+  , asc_order
+  , path
+  , fair_assign AS fair_a
+   , first_assign AS first_a
+   , last_assign AS last_a
+   , decrease_assign AS des_a
+   , increase_assign AS inc_a
+FROM
+  activity_log_with_conversion_assign
+ORDER BY
+  session, asc_order;
+```
+
+
+ページの価値の合計をpathごとに集計する. 
+ただし合計値はＶｉｅｗが多いほど大きくなるので, 
+該当ページの訪問回数やページビューで除す. 
+
+
+```{sql 6.2.4.2}
+WITH 
+activity_log_with_conversion_flag AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , SIGN(SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+           OVER(PARTITION BY session ORDER BY stamp DESC
+              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      ) AS has_conversion
+  FROM 
+    activity_log
+)
+, activity_log_with_conversion_assign AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) AS asc_order
+    , ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) AS desc_order
+    , COUNT(1) OVER(PARTITION BY session) AS page_count
+    
+    -- 1. コンバージョンに至るアクセスログに均等に価値を振る
+    , 1000. / COUNT(1) OVER(PARTITION BY session) AS fair_assign
+    -- 2. コンバージョンに至るアクセスログの最初のページに価値を振る
+    , CASE
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC) = 1
+          THEN 1000.
+        ELSE 0.
+      END AS first_assign
+    --3. コンバージョンに至るアクセスログの最後のページに価値を割り振る
+    , CASE
+        WHEN ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC) = 1
+          THEN 1000.
+        ELSE 0.
+      END AS last_assign
+    --4成果地点から近いページにより高く割り合る
+    --連番の和の公式を使う
+    , 1000.
+      * ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp ASC )
+      / (
+        COUNT(1) OVER(PARTITION BY session) 
+        * (COUNT(1) OVER(PARTITION BY session) + 1) 
+        / 2
+      ) AS decrease_assign
+    -- 5成果地点から遠いページによｒ高く割り当てる
+    , 1000. 
+      * ROW_NUMBER() OVER(PARTITION BY session ORDER BY stamp DESC)
+      / (
+        COUNT(1) OVER(PARTITION BY session )
+        * (COUNT(1) OVER(PARTITION BY session) + 1)
+        / 2
+      ) AS increase_assign
+  FROM activity_log_with_conversion_flag
+  WHERE
+    has_conversion = 1
+    AND path NOT IN ('/input', '/confirm', '/complete')
+)
+, page_total_values AS (
+  SELECT 
+    path
+    , SUM(fair_assign) AS sum_fair
+    , SUM(first_assign) AS sum_first
+    , SUM(last_assign) AS sum_last
+    , SUM(increase_assign) AS sum_inc
+    , SUM(decrease_assign) AS sum_dec
+  FROM
+    activity_log_with_conversion_assign
+  GROUP BY
+    path
+)
+, page_total_cnt AS (
+  SELECT
+    path
+    , COUNT(1) AS access_cnt
+  FROM
+    activity_log
+  GROUP BY
+    path
+)
+SELECT
+  s.path
+  , s.access_cnt / s.access_cnt AS avg_fair
+  , v.sum_fair / s.access_cnt AS avg_first
+  , v.sum_first / s.access_cnt AS avg_last
+  , v.sum_last / s.access_cnt AS avg_dec
+  , v.sum_dec / s.access_cnt AS avg_dec
+  , v.sum_inc / s.access_cnt AS avg_inc
+FROM
+  page_total_cnt AS s
+  JOIN
+  page_total_values AS v
+  ON s.path  = v.path
+ORDER BY 
+  s.access_cnt DESC;
+```
+
+
+
+
+## 検索条件毎のユーザー行動
+
+カテゴリーを指定するなど検索条件はユーザーにとって異なり, 
+詳細な条件を使うユーザーほど熱心といえる. 
+そこで検索ページごとに詳細ページへ遷移した割合(CTR)
+と詳細ページ閲覧後に成果に結びついた割合(CVR)を2軸で表現したもの可視化する. 
+
+
+```{sql 6.2.5.1}
+WITH
+activity_log_with_session_click_conversion_flag AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , search_type
+    -- コンバージョンしたページより前のアクセスにフラグを立てる
+    , SIGN(
+        SUM(CASE WHEN path = '/detail' THEN 1 ELSE 0 END)
+        OVER(PARTITION BY session ORDER BY stamp DESC ROWS BETWEEN UNBOUNDED 
+          PRECEDING AND CURRENT ROW)
+    ) AS has_session_click
+    , SIGN(
+        SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+        OVER(PARTITION BY session ORDER BY stamp DESC ROWS BETWEEN UNBOUNDED 
+          PRECEDING AND CURRENT ROW)
+    ) AS has_session_conversion
+  FROM
+    activity_log
+)
+SELECT
+  session
+  , stamp
+  , path
+  , search_type
+  , has_session_click AS click
+  , has_session_conversion AS cnv
+FROM
+  activity_log_with_session_click_conversion_flag
+ORDER BY
+  session, stamp
+;
+```
+
+上記のクエリでクリックフラグとコンバージョンフラグが計算できたら, 
+続いて, 下記コード例に示すクエリで検索ログのみに絞り込み, 
+CTR, CVR等を計算する
+
+
+```{sql 6.2.5.2}
+WITH
+activity_log_with_session_click_conversion_flag AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , search_type
+    -- コンバージョンしたページより前のアクセスにフラグを立てる
+    , SIGN(
+        SUM(CASE WHEN path = '/detail' THEN 1 ELSE 0 END)
+        OVER(PARTITION BY session ORDER BY stamp DESC ROWS BETWEEN UNBOUNDED 
+          PRECEDING AND CURRENT ROW)
+    ) AS has_session_click
+    , SIGN(
+        SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+        OVER(PARTITION BY session ORDER BY stamp DESC ROWS BETWEEN UNBOUNDED 
+          PRECEDING AND CURRENT ROW)
+    ) AS has_session_conversion
+  FROM
+    activity_log
+)
+SELECT
+  search_type
+  , COUNT(1) AS count
+  , SUM(has_session_click) AS detail
+  , AVG(has_session_click) AS ctr
+  , SUM(CASE WHEN has_session_click = 1 THEN has_session_conversion END) AS conversion
+  , AVG(CASE WHEN has_session_click = 1 THEN has_session_conversion END) AS cvr
+FROM
+  activity_log_with_session_click_conversion_flag
+WHERE
+  path = '/search_list'
+GROUP BY
+  search_type
+ORDER BY 
+  count DESC
+;
+```
+
+全体像を把握するケースでは利用できるが, 
+成果直前の検索結果のみを対象にするには, 
+上記WITH句を修正する. 
+`LAG`関数で詳細ページへのアクセス直近のアクセスフラグを立てる. 
+
+```{sql 6.2.5.3}
+WITH
+activity_log_with_session_click_conversion_flag AS (
+  SELECT
+    session
+    , stamp
+    , path
+    , search_type
+    
+    -- 詳細ページの直前のページにフラグを立てる
+    , CASE
+        WHEN LAG(path) OVER(PARTITION BY session ORDER BY stamp DESC) = '/detail'
+          THEN 1
+        ELSE 0
+      END AS has_session_click
+    -- コンバージョンしたページより前のアクセスにフラグを立てる
+    , SIGN(
+        SUM(CASE WHEN path = '/complete' THEN 1 ELSE 0 END)
+          OVER(PARTITION BY session ORDER BY stamp DESC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+    ) AS has_session_conversion
+  FROM
+    activity_log
+)
+SELECT 
+  session
+  , stamp
+  , path
+  , search_type
+  , has_session_click AS click
+  , has_session_conversion AS cnv
+FROM  
+  activity_log_with_session_click_conversion_flag
+ORDER BY 
+  session, stamp
+;
+```
+
+
+## フォールアウトレポート
+
+ユーザー回遊の一連の流れの中でどこで離脱し, どこで背にをしているかを
+調査し改善することで全体のＣＶＲを向上させることが可能となる. 
+
+ある地点から, ある地点へ遷移することをフォールスルーという. 
+ある地点からの離脱をフォールアウトと呼ぶ. 
+
+```{sql 6.2.5.7}
+WITH
+mst_fallout_step AS( 
+  SELECT 1 AS step, '/'  AS path
+  UNION ALL SELECT 2 AS step, '/search_list' AS path
+  UNION ALL SELECT 3 AS step, '/ddetail' AS path
+  UNION ALL SELECT 4 AS step, '/input' AS path
+  UNION ALL SELECT 5 AS step, '/complete' AS path
+)
+, activity_log_with_fallout_step AS (
+  SELECT 
+    l.session
+    , m.step
+    , m.path
+    , MAX(l.stamp) AS max_stamp
+    , MIN(l.stamp) AS min_stamp
+  FROM
+    mst_fallout_step AS m
+    JOIN
+    activity_log AS l
+    ON m.path = l.path
+  GROUP BY
+    l.session, m.step, m.path
+)
+, activity_log_with_mod_fallout_step AS (
+  SELECT
+    session
+    , step
+    , path
+    , max_stamp
+    , LAG(min_stamp)
+        OVER(PARTITION BY session ORDER BY step)
+        AS lag_min_stamp
+    , MIN(step) OVER(PARTITION BY session) AS min_step
+    , COUNT(1) 
+        OVER(PARTITION BY session ORDER BY step 
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      AS cum_count
+  FROM
+    activity_log_with_fallout_step
+)
+SELECT  
+  *
+FROM
+  activity_log_with_mod_fallout_step
+ORDER BY
+  session, step
+;
+```
+
+
+
+
+
+
+
+
+
 
 # コネクションの削除
 

@@ -1664,6 +1664,823 @@ activity_log_with_conversion_flag <span class="kw">AS</span> (
 <p>商品購入や資料請求の場面でCVRは高くなるため, CVRを比較するときには同じ階層や類似コンテンツの場合とする.</p>
 </div>
 </div>
+<div class="section level2">
+<h2>ページの価値を算出する</h2>
+<p>売り上げに結びつかないページを回遊させるよりも, より成果に結びつくページへの回遊を増やすことは 上等手段である.</p>
+<p>ページの価値を算出するには「<strong>何を成果の数値とするのか</strong>」と 「<strong>何を評価したいのか</strong>」を決める</p>
+<div class="section level3">
+<h3>ページの価値を集計する準備</h3>
+<p>ページに価値を与えるロジックはいろいろある.</p>
+<ul>
+<li>最初のページに割り当てる</li>
+<li>最後のページに割り当てる</li>
+<li>均等に分配する</li>
+<li>成果地点から近いページにより高く割り当てる</li>
+<li>成果地点から遠いページにより高く割り当てる</li>
+</ul>
+</div>
+<div class="section level3">
+<h3>任意の階級でヒストグラム</h3>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span> 
+activity_log_with_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , <span class="fu">SIGN</span>(<span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+           <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>
+              <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+      ) <span class="kw">AS</span> has_conversion
+  <span class="kw">FROM</span> 
+    activity_log
+)
+, activity_log_with_conversion_assign <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) <span class="kw">AS</span> asc_order
+    , <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>) <span class="kw">AS</span> desc_order
+    , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) <span class="kw">AS</span> page_count
+    
+    <span class="co">-- 1. コンバージョンに至るアクセスログに均等に価値を振る</span>
+    , <span class="dv">1000</span>. / <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) <span class="kw">AS</span> fair_assign
+    <span class="co">-- 2. コンバージョンに至るアクセスログの最初のページに価値を振る</span>
+    , <span class="kw">CASE</span>
+        <span class="kw">WHEN</span> <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) = <span class="dv">1</span>
+          <span class="kw">THEN</span> <span class="dv">1000</span>.
+        <span class="kw">ELSE</span> <span class="dv">0</span>.
+      <span class="kw">END</span> <span class="kw">AS</span> first_assign
+    <span class="co">--3. コンバージョンに至るアクセスログの最後のページに価値を割り振る</span>
+    , <span class="kw">CASE</span>
+        <span class="kw">WHEN</span> <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>) = <span class="dv">1</span>
+          <span class="kw">THEN</span> <span class="dv">1000</span>.
+        <span class="kw">ELSE</span> <span class="dv">0</span>.
+      <span class="kw">END</span> <span class="kw">AS</span> last_assign
+    <span class="co">--4成果地点から近いページにより高く割り合る</span>
+    <span class="co">--連番の和の公式を使う</span>
+    , <span class="dv">1000</span>.
+      * <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span> )
+      / (
+        <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) 
+        * (<span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) + <span class="dv">1</span>) 
+        / <span class="dv">2</span>
+      ) <span class="kw">AS</span> decrease_assign
+    <span class="co">-- 5成果地点から遠いページによｒ高く割り当てる</span>
+    , <span class="dv">1000</span>. 
+      * <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>)
+      / (
+        <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> )
+        * (<span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) + <span class="dv">1</span>)
+        / <span class="dv">2</span>
+      ) <span class="kw">AS</span> increase_assign
+  <span class="kw">FROM</span> activity_log_with_conversion_flag
+  <span class="kw">WHERE</span>
+    has_conversion = <span class="dv">1</span>
+    <span class="kw">AND</span> path <span class="kw">NOT</span> <span class="kw">IN</span> (<span class="st">'/input'</span>, <span class="st">'/confirm'</span>, <span class="st">'/complete'</span>)
+)
+<span class="kw">SELECT</span>
+  <span class="kw">session</span>
+  , asc_order
+  , path
+  , fair_assign <span class="kw">AS</span> fair_a
+   , first_assign <span class="kw">AS</span> first_a
+   , last_assign <span class="kw">AS</span> last_a
+   , decrease_assign <span class="kw">AS</span> des_a
+   , increase_assign <span class="kw">AS</span> inc_a
+<span class="kw">FROM</span>
+  activity_log_with_conversion_assign
+<span class="kw">ORDER</span> <span class="kw">BY</span>
+  <span class="kw">session</span>, asc_order;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>3 records</caption>
+<thead>
+<tr class="header">
+<th align="left">session</th>
+<th align="right">asc_order</th>
+<th align="left">path</th>
+<th align="right">fair_a</th>
+<th align="right">first_a</th>
+<th align="right">last_a</th>
+<th align="right">des_a</th>
+<th align="right">inc_a</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">8cc03a54</td>
+<td align="right">1</td>
+<td align="left">/search_list</td>
+<td align="right">1000</td>
+<td align="right">1000</td>
+<td align="right">1000</td>
+<td align="right">1000.0000</td>
+<td align="right">1000.0000</td>
+</tr>
+<tr class="even">
+<td align="left">9afaf87c</td>
+<td align="right">1</td>
+<td align="left">/search_list</td>
+<td align="right">500</td>
+<td align="right">1000</td>
+<td align="right">0</td>
+<td align="right">333.3333</td>
+<td align="right">666.6667</td>
+</tr>
+<tr class="odd">
+<td align="left">9afaf87c</td>
+<td align="right">2</td>
+<td align="left">/detail</td>
+<td align="right">500</td>
+<td align="right">0</td>
+<td align="right">1000</td>
+<td align="right">666.6667</td>
+<td align="right">333.3333</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>ページの価値の合計をpathごとに集計する. ただし合計値はＶｉｅｗが多いほど大きくなるので, 該当ページの訪問回数やページビューで除す.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span> 
+activity_log_with_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , <span class="fu">SIGN</span>(<span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+           <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>
+              <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+      ) <span class="kw">AS</span> has_conversion
+  <span class="kw">FROM</span> 
+    activity_log
+)
+, activity_log_with_conversion_assign <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) <span class="kw">AS</span> asc_order
+    , <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>) <span class="kw">AS</span> desc_order
+    , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) <span class="kw">AS</span> page_count
+    
+    <span class="co">-- 1. コンバージョンに至るアクセスログに均等に価値を振る</span>
+    , <span class="dv">1000</span>. / <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) <span class="kw">AS</span> fair_assign
+    <span class="co">-- 2. コンバージョンに至るアクセスログの最初のページに価値を振る</span>
+    , <span class="kw">CASE</span>
+        <span class="kw">WHEN</span> <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) = <span class="dv">1</span>
+          <span class="kw">THEN</span> <span class="dv">1000</span>.
+        <span class="kw">ELSE</span> <span class="dv">0</span>.
+      <span class="kw">END</span> <span class="kw">AS</span> first_assign
+    <span class="co">--3. コンバージョンに至るアクセスログの最後のページに価値を割り振る</span>
+    , <span class="kw">CASE</span>
+        <span class="kw">WHEN</span> <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>) = <span class="dv">1</span>
+          <span class="kw">THEN</span> <span class="dv">1000</span>.
+        <span class="kw">ELSE</span> <span class="dv">0</span>.
+      <span class="kw">END</span> <span class="kw">AS</span> last_assign
+    <span class="co">--4成果地点から近いページにより高く割り合る</span>
+    <span class="co">--連番の和の公式を使う</span>
+    , <span class="dv">1000</span>.
+      * <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span> )
+      / (
+        <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) 
+        * (<span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) + <span class="dv">1</span>) 
+        / <span class="dv">2</span>
+      ) <span class="kw">AS</span> decrease_assign
+    <span class="co">-- 5成果地点から遠いページによｒ高く割り当てる</span>
+    , <span class="dv">1000</span>. 
+      * <span class="fu">ROW_NUMBER</span>() <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>)
+      / (
+        <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> )
+        * (<span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) + <span class="dv">1</span>)
+        / <span class="dv">2</span>
+      ) <span class="kw">AS</span> increase_assign
+  <span class="kw">FROM</span> activity_log_with_conversion_flag
+  <span class="kw">WHERE</span>
+    has_conversion = <span class="dv">1</span>
+    <span class="kw">AND</span> path <span class="kw">NOT</span> <span class="kw">IN</span> (<span class="st">'/input'</span>, <span class="st">'/confirm'</span>, <span class="st">'/complete'</span>)
+)
+, page_total_values <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> 
+    path
+    , <span class="fu">SUM</span>(fair_assign) <span class="kw">AS</span> sum_fair
+    , <span class="fu">SUM</span>(first_assign) <span class="kw">AS</span> sum_first
+    , <span class="fu">SUM</span>(last_assign) <span class="kw">AS</span> sum_last
+    , <span class="fu">SUM</span>(increase_assign) <span class="kw">AS</span> sum_inc
+    , <span class="fu">SUM</span>(decrease_assign) <span class="kw">AS</span> sum_dec
+  <span class="kw">FROM</span>
+    activity_log_with_conversion_assign
+  <span class="kw">GROUP</span> <span class="kw">BY</span>
+    path
+)
+, page_total_cnt <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    path
+    , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> access_cnt
+  <span class="kw">FROM</span>
+    activity_log
+  <span class="kw">GROUP</span> <span class="kw">BY</span>
+    path
+)
+<span class="kw">SELECT</span>
+  s.path
+  , s.access_cnt / s.access_cnt <span class="kw">AS</span> avg_fair
+  , v.sum_fair / s.access_cnt <span class="kw">AS</span> avg_first
+  , v.sum_first / s.access_cnt <span class="kw">AS</span> avg_last
+  , v.sum_last / s.access_cnt <span class="kw">AS</span> avg_dec
+  , v.sum_dec / s.access_cnt <span class="kw">AS</span> avg_dec
+  , v.sum_inc / s.access_cnt <span class="kw">AS</span> avg_inc
+<span class="kw">FROM</span>
+  page_total_cnt <span class="kw">AS</span> s
+  <span class="kw">JOIN</span>
+  page_total_values <span class="kw">AS</span> v
+  <span class="kw">ON</span> s.path  = v.path
+<span class="kw">ORDER</span> <span class="kw">BY</span> 
+  s.access_cnt <span class="kw">DESC</span>;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>2 records</caption>
+<thead>
+<tr class="header">
+<th align="left">path</th>
+<th align="right">avg_fair</th>
+<th align="right">avg_first</th>
+<th align="right">avg_last</th>
+<th align="right">avg_dec</th>
+<th align="right">avg_dec</th>
+<th align="right">avg_inc</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">/detail</td>
+<td align="right">1</td>
+<td align="right">45.45455</td>
+<td align="right">0</td>
+<td align="right">90.90909</td>
+<td align="right">60.60606</td>
+<td align="right">30.30303</td>
+</tr>
+<tr class="even">
+<td align="left">/search_list</td>
+<td align="right">1</td>
+<td align="right">150.00000</td>
+<td align="right">200</td>
+<td align="right">100.00000</td>
+<td align="right">133.33333</td>
+<td align="right">166.66667</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+<div class="section level2">
+<h2>検索条件毎のユーザー行動</h2>
+<p>カテゴリーを指定するなど検索条件はユーザーにとって異なり, 詳細な条件を使うユーザーほど熱心といえる. そこで検索ページごとに詳細ページへ遷移した割合(CTR) と詳細ページ閲覧後に成果に結びついた割合(CVR)を2軸で表現したもの可視化する.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+activity_log_with_session_click_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , search_type
+    <span class="co">-- コンバージョンしたページより前のアクセスにフラグを立てる</span>
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/detail'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span> <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> 
+          <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+    ) <span class="kw">AS</span> has_session_click
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span> <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> 
+          <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+    ) <span class="kw">AS</span> has_session_conversion
+  <span class="kw">FROM</span>
+    activity_log
+)
+<span class="kw">SELECT</span>
+  <span class="kw">session</span>
+  , stamp
+  , path
+  , search_type
+  , has_session_click <span class="kw">AS</span> click
+  , has_session_conversion <span class="kw">AS</span> cnv
+<span class="kw">FROM</span>
+  activity_log_with_session_click_conversion_flag
+<span class="kw">ORDER</span> <span class="kw">BY</span>
+  <span class="kw">session</span>, stamp
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>Displaying records 1 - 10</caption>
+<thead>
+<tr class="header">
+<th align="left">session</th>
+<th align="left">stamp</th>
+<th align="left">path</th>
+<th align="left">search_type</th>
+<th align="right">click</th>
+<th align="right">cnv</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">0fe39581</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="left">Area-S</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="left">Pref</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:19:11</td>
+<td align="left">/search_input</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:20:10</td>
+<td align="left">/</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:21:14</td>
+<td align="left">/search_input</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">1cf7678e</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+<td align="right">1</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">1cf7678e</td>
+<td align="left">2017-01-09 12:19:04</td>
+<td align="left">/</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">36dd0df7</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="left">Pref-with-Job</td>
+<td align="right">1</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">36dd0df7</td>
+<td align="left">2017-01-09 12:19:49</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+<td align="right">1</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">3efe001c</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+<td align="right">1</td>
+<td align="right">0</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>上記のクエリでクリックフラグとコンバージョンフラグが計算できたら, 続いて, 下記コード例に示すクエリで検索ログのみに絞り込み, CTR, CVR等を計算する</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+activity_log_with_session_click_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , search_type
+    <span class="co">-- コンバージョンしたページより前のアクセスにフラグを立てる</span>
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/detail'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span> <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> 
+          <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+    ) <span class="kw">AS</span> has_session_click
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span> <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> 
+          <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+    ) <span class="kw">AS</span> has_session_conversion
+  <span class="kw">FROM</span>
+    activity_log
+)
+<span class="kw">SELECT</span>
+  search_type
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  , <span class="fu">SUM</span>(has_session_click) <span class="kw">AS</span> detail
+  , <span class="fu">AVG</span>(has_session_click) <span class="kw">AS</span> ctr
+  , <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> has_session_click = <span class="dv">1</span> <span class="kw">THEN</span> has_session_conversion <span class="kw">END</span>) <span class="kw">AS</span> conversion
+  , <span class="fu">AVG</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> has_session_click = <span class="dv">1</span> <span class="kw">THEN</span> has_session_conversion <span class="kw">END</span>) <span class="kw">AS</span> cvr
+<span class="kw">FROM</span>
+  activity_log_with_session_click_conversion_flag
+<span class="kw">WHERE</span>
+  path = <span class="st">'/search_list'</span>
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  search_type
+<span class="kw">ORDER</span> <span class="kw">BY</span> 
+  <span class="fu">count</span> <span class="kw">DESC</span>
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>8 records</caption>
+<thead>
+<tr class="header">
+<th align="left">search_type</th>
+<th align="right">count</th>
+<th align="right">detail</th>
+<th align="right">ctr</th>
+<th align="right">conversion</th>
+<th align="right">cvr</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">Area-S</td>
+<td align="right">2</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+<td align="right">NA</td>
+</tr>
+<tr class="even">
+<td align="left">Pref</td>
+<td align="right">2</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+<td align="right">NA</td>
+</tr>
+<tr class="odd">
+<td align="left">Area-L-with-Job</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+<td align="right">NA</td>
+</tr>
+<tr class="even">
+<td align="left">Line</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">Station-with-Job</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left"></td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">Pref-with-Job</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">Area-L</td>
+<td align="right">1</td>
+<td align="right">0</td>
+<td align="right">0</td>
+<td align="right">NA</td>
+<td align="right">NA</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>全体像を把握するケースでは利用できるが, 成果直前の検索結果のみを対象にするには, 上記WITH句を修正する. <code>LAG</code>関数で詳細ページへのアクセス直近のアクセスフラグを立てる.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+activity_log_with_session_click_conversion_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path
+    , search_type
+    
+    <span class="co">-- 詳細ページの直前のページにフラグを立てる</span>
+    , <span class="kw">CASE</span>
+        <span class="kw">WHEN</span> <span class="fu">LAG</span>(path) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>) = <span class="st">'/detail'</span>
+          <span class="kw">THEN</span> <span class="dv">1</span>
+        <span class="kw">ELSE</span> <span class="dv">0</span>
+      <span class="kw">END</span> <span class="kw">AS</span> has_session_click
+    <span class="co">-- コンバージョンしたページより前のアクセスにフラグを立てる</span>
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path = <span class="st">'/complete'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+          <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">DESC</span>
+            <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+    ) <span class="kw">AS</span> has_session_conversion
+  <span class="kw">FROM</span>
+    activity_log
+)
+<span class="kw">SELECT</span> 
+  <span class="kw">session</span>
+  , stamp
+  , path
+  , search_type
+  , has_session_click <span class="kw">AS</span> click
+  , has_session_conversion <span class="kw">AS</span> cnv
+<span class="kw">FROM</span>  
+  activity_log_with_session_click_conversion_flag
+<span class="kw">ORDER</span> <span class="kw">BY</span> 
+  <span class="kw">session</span>, stamp
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>Displaying records 1 - 10</caption>
+<thead>
+<tr class="header">
+<th align="left">session</th>
+<th align="left">stamp</th>
+<th align="left">path</th>
+<th align="left">search_type</th>
+<th align="right">click</th>
+<th align="right">cnv</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">0fe39581</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="left">Area-S</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="left">Pref</td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:19:11</td>
+<td align="left">/search_input</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:20:10</td>
+<td align="left">/</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="left">2017-01-09 12:21:14</td>
+<td align="left">/search_input</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">1cf7678e</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">1cf7678e</td>
+<td align="left">2017-01-09 12:19:04</td>
+<td align="left">/</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">36dd0df7</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/search_list</td>
+<td align="left">Pref-with-Job</td>
+<td align="right">1</td>
+<td align="right">0</td>
+</tr>
+<tr class="odd">
+<td align="left">36dd0df7</td>
+<td align="left">2017-01-09 12:19:49</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+<tr class="even">
+<td align="left">3efe001c</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">/detail</td>
+<td align="left"></td>
+<td align="right">0</td>
+<td align="right">0</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level2">
+<h2>フォールアウトレポート</h2>
+<p>ユーザー回遊の一連の流れの中でどこで離脱し, どこで背にをしているかを 調査し改善することで全体のＣＶＲを向上させることが可能となる.</p>
+<p>ある地点から, ある地点へ遷移することをフォールスルーという. ある地点からの離脱をフォールアウトと呼ぶ.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+mst_fallout_step <span class="kw">AS</span>( 
+  <span class="kw">SELECT</span> <span class="dv">1</span> <span class="kw">AS</span> step, <span class="st">'/'</span>  <span class="kw">AS</span> path
+  <span class="kw">UNION</span> <span class="kw">ALL</span> <span class="kw">SELECT</span> <span class="dv">2</span> <span class="kw">AS</span> step, <span class="st">'/search_list'</span> <span class="kw">AS</span> path
+  <span class="kw">UNION</span> <span class="kw">ALL</span> <span class="kw">SELECT</span> <span class="dv">3</span> <span class="kw">AS</span> step, <span class="st">'/ddetail'</span> <span class="kw">AS</span> path
+  <span class="kw">UNION</span> <span class="kw">ALL</span> <span class="kw">SELECT</span> <span class="dv">4</span> <span class="kw">AS</span> step, <span class="st">'/input'</span> <span class="kw">AS</span> path
+  <span class="kw">UNION</span> <span class="kw">ALL</span> <span class="kw">SELECT</span> <span class="dv">5</span> <span class="kw">AS</span> step, <span class="st">'/complete'</span> <span class="kw">AS</span> path
+)
+, activity_log_with_fallout_step <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> 
+    l.session
+    , m.step
+    , m.path
+    , <span class="fu">MAX</span>(l.stamp) <span class="kw">AS</span> max_stamp
+    , <span class="fu">MIN</span>(l.stamp) <span class="kw">AS</span> min_stamp
+  <span class="kw">FROM</span>
+    mst_fallout_step <span class="kw">AS</span> m
+    <span class="kw">JOIN</span>
+    activity_log <span class="kw">AS</span> l
+    <span class="kw">ON</span> m.path = l.path
+  <span class="kw">GROUP</span> <span class="kw">BY</span>
+    l.session, m.step, m.path
+)
+, activity_log_with_mod_fallout_step <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , step
+    , path
+    , max_stamp
+    , <span class="fu">LAG</span>(min_stamp)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> step)
+        <span class="kw">AS</span> lag_min_stamp
+    , <span class="fu">MIN</span>(step) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) <span class="kw">AS</span> min_step
+    , <span class="fu">COUNT</span>(<span class="dv">1</span>) 
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> step 
+          <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+      <span class="kw">AS</span> cum_count
+  <span class="kw">FROM</span>
+    activity_log_with_fallout_step
+)
+<span class="kw">SELECT</span>  
+  *
+<span class="kw">FROM</span>
+  activity_log_with_mod_fallout_step
+<span class="kw">ORDER</span> <span class="kw">BY</span>
+  <span class="kw">session</span>, step
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>Displaying records 1 - 10</caption>
+<thead>
+<tr class="header">
+<th align="left">session</th>
+<th align="right">step</th>
+<th align="left">path</th>
+<th align="left">max_stamp</th>
+<th align="left">lag_min_stamp</th>
+<th align="right">min_step</th>
+<th align="right">cum_count</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">0fe39581</td>
+<td align="right">2</td>
+<td align="left">/search_list</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">NA</td>
+<td align="right">2</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">111f2996</td>
+<td align="right">1</td>
+<td align="left">/</td>
+<td align="left">2017-01-09 12:20:10</td>
+<td align="left">NA</td>
+<td align="right">1</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">111f2996</td>
+<td align="right">2</td>
+<td align="left">/search_list</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">2017-01-09 12:20:10</td>
+<td align="right">1</td>
+<td align="right">2</td>
+</tr>
+<tr class="even">
+<td align="left">1cf7678e</td>
+<td align="right">1</td>
+<td align="left">/</td>
+<td align="left">2017-01-09 12:19:04</td>
+<td align="left">NA</td>
+<td align="right">1</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">36dd0df7</td>
+<td align="right">2</td>
+<td align="left">/search_list</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">NA</td>
+<td align="right">2</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">47db0370</td>
+<td align="right">2</td>
+<td align="left">/search_list</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">NA</td>
+<td align="right">2</td>
+<td align="right">1</td>
+</tr>
+<tr class="odd">
+<td align="left">87b5725f</td>
+<td align="right">1</td>
+<td align="left">/</td>
+<td align="left">2017-01-09 12:25:25</td>
+<td align="left">NA</td>
+<td align="right">1</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">87b5725f</td>
+<td align="right">2</td>
+<td align="left">/search_list</td>
+<td align="left">2017-01-09 12:22:51</td>
+<td align="left">2017-01-09 12:20:46</td>
+<td align="right">1</td>
+<td align="right">2</td>
+</tr>
+<tr class="odd">
+<td align="left">8cc03a54</td>
+<td align="right">2</td>
+<td align="left">/search_list</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="left">NA</td>
+<td align="right">2</td>
+<td align="right">1</td>
+</tr>
+<tr class="even">
+<td align="left">8cc03a54</td>
+<td align="right">4</td>
+<td align="left">/input</td>
+<td align="left">2017-01-09 12:18:44</td>
+<td align="left">2017-01-09 12:18:43</td>
+<td align="right">2</td>
+<td align="right">2</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
 </div>
 <div class="section level1">
 <h1>コネクションの削除</h1>
