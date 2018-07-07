@@ -2365,120 +2365,669 @@ mst_fallout_step <span class="kw">AS</span>(
   <span class="kw">FROM</span>
     activity_log_with_fallout_step
 )
-<span class="kw">SELECT</span>  
-  *
+, fallout_log <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> 
+    <span class="kw">session</span> 
+    , step
+    , path
+  <span class="kw">FROM</span>
+    activity_log_with_mod_fallout_step
+  <span class="kw">WHERE</span>
+    min_step = <span class="dv">1</span>
+    <span class="kw">AND</span> 
+    step = cum_count
+    <span class="kw">AND</span>
+    (lag_min_stamp <span class="kw">IS</span> <span class="kw">NULL</span> <span class="kw">OR</span> max_stamp &gt;= lag_min_stamp)
+)
+<span class="kw">SELECT</span> 
+  step
+  , path
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  <span class="co">-- 度数を全体の度数で除している</span>
+  <span class="co">-- 全体の度数を別途用意するのではなく, ウィンドウ関数を使っている</span>
+  , <span class="dv">100</span>. * <span class="fu">COUNT</span>(<span class="dv">1</span>)
+    / <span class="fu">FIRST_VALUE</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>))
+    <span class="kw">OVER</span>(<span class="kw">ORDER</span> <span class="kw">BY</span> step <span class="kw">ASC</span> <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">UNBOUNDED</span> <span class="kw">FOLLOWING</span>)
+    <span class="kw">AS</span> first_trans_rate
+  <span class="co">-- 直前の度数で除すことで遷移率を求めている</span>
+  , <span class="dv">100</span>. * <span class="fu">COUNT</span>(<span class="dv">1</span>) 
+    / <span class="fu">LAG</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>)) <span class="kw">OVER</span>(<span class="kw">ORDER</span> <span class="kw">BY</span> step <span class="kw">ASC</span>)
+    <span class="kw">AS</span> step_trans_rate
 <span class="kw">FROM</span>
-  activity_log_with_mod_fallout_step
+  fallout_log
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  step, path
+<span class="kw">ORDER</span> <span class="kw">BY</span> 
+  step
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>2 records</caption>
+<thead>
+<tr class="header">
+<th align="left">step</th>
+<th align="left">path</th>
+<th align="right">count</th>
+<th align="right">first_trans_rate</th>
+<th align="right">step_trans_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">1</td>
+<td align="left">/</td>
+<td align="right">3</td>
+<td align="right">100.00000</td>
+<td align="right">NA</td>
+</tr>
+<tr class="even">
+<td align="left">2</td>
+<td align="left">/search_list</td>
+<td align="right">1</td>
+<td align="right">33.33333</td>
+<td align="right">33.33333</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level2">
+<h2>サイト内のユーザーフロー</h2>
+<p>ユーザーのサイト内の回遊が, サイト作成者の意図と異なれば そこに改善の可能性がある.</p>
+<p>この分析にはまず起点となるページを自分で決める.</p>
+<ul>
+<li>トップページからの遷移</li>
+<li>詳細画面の前後</li>
+</ul>
+<div class="section level3">
+<h3>次のページを集計する</h3>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+activity_log_with_lead_path <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , stamp
+    , path <span class="kw">AS</span> path0
+    <span class="co">-- 1後にアクセスしたパスを取得</span>
+    , <span class="fu">LEAD</span>(path, <span class="dv">1</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) <span class="kw">AS</span> path1
+    <span class="co">-- 2後にアクセスしたパスを取得</span>
+    , <span class="fu">LEAD</span>(path, <span class="dv">2</span>) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> stamp <span class="kw">ASC</span>) <span class="kw">AS</span> path2
+  <span class="kw">FROM</span>
+    activity_log
+)
+, raw_user_flow <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    path0
+    <span class="co">-- 起点となるパスへのアクセス数</span>
+    , <span class="fu">SUM</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>)) <span class="kw">OVER</span>() <span class="kw">AS</span> count0
+    <span class="co">-- 1つ後にアクセスしたパス</span>
+    , <span class="kw">COALESCE</span>(path1, <span class="st">'NULL'</span>) <span class="kw">AS</span> path1
+    <span class="co">-- 1つ後にアクセスしたパスのアクセス数</span>
+    , <span class="fu">SUM</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>)) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> path0, path1) <span class="kw">AS</span> count1
+    <span class="co">-- 2つ後にアクセスしたパス</span>
+    , <span class="kw">COALESCE</span>(path2, <span class="st">'NULL'</span>) <span class="kw">AS</span> path2
+    <span class="co">-- 2つ後にアクセスしたパスへのアクセス数</span>
+    , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> count2
+  <span class="kw">FROM</span>
+    activity_log_with_lead_path
+  <span class="kw">WHERE</span>
+    path0 = <span class="st">'/detail'</span>
+  <span class="kw">GROUP</span> <span class="kw">BY</span> 
+    path0, path1, path2
+)
+<span class="kw">SELECT</span>
+  path0
+  , count0
+  , path1
+  , count1
+  , <span class="dv">100</span>. * count1 / count0 <span class="kw">AS</span> rate1
+  , path2
+  , count2
+  , <span class="dv">100</span>. * count2 / count1 <span class="kw">AS</span> rate2
+<span class="kw">FROM</span>
+  raw_user_flow
 <span class="kw">ORDER</span> <span class="kw">BY</span>
-  <span class="kw">session</span>, step
+  count1 <span class="kw">DESC</span>
+  , count2 <span class="kw">DESC</span>
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>4 records</caption>
+<thead>
+<tr class="header">
+<th align="left">path0</th>
+<th align="right">count0</th>
+<th align="left">path1</th>
+<th align="right">count1</th>
+<th align="right">rate1</th>
+<th align="left">path2</th>
+<th align="right">count2</th>
+<th align="right">rate2</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">/detail</td>
+<td align="right">11</td>
+<td align="left">NULL</td>
+<td align="right">7</td>
+<td align="right">63.636364</td>
+<td align="left">NULL</td>
+<td align="right">7</td>
+<td align="right">100</td>
+</tr>
+<tr class="even">
+<td align="left">/detail</td>
+<td align="right">11</td>
+<td align="left">/</td>
+<td align="right">2</td>
+<td align="right">18.181818</td>
+<td align="left">NULL</td>
+<td align="right">2</td>
+<td align="right">100</td>
+</tr>
+<tr class="odd">
+<td align="left">/detail</td>
+<td align="right">11</td>
+<td align="left">/input</td>
+<td align="right">1</td>
+<td align="right">9.090909</td>
+<td align="left">/confirm</td>
+<td align="right">1</td>
+<td align="right">100</td>
+</tr>
+<tr class="even">
+<td align="left">/detail</td>
+<td align="right">11</td>
+<td align="left">/search_list</td>
+<td align="right">1</td>
+<td align="right">9.090909</td>
+<td align="left">/</td>
+<td align="right">1</td>
+<td align="right">100</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>この出力では, 重複したレコードが出力しないように 出来る裸子が, CASE句を死ぬほど記述することになるので省略する.</p>
+</div>
+<div class="section level3">
+<h3>前のページを集計</h3>
+<p>次のページを集計するで, <code>LEAD</code>を<code>LAG</code>に変更することで対応ができる.</p>
+</div>
+<div class="section level3">
+<h3>ページの読了率</h3>
+<p>どこで離脱したかを把握することで, ユーザーがサイトに満足しているのかがわかる.</p>
+<p>読了率を調べるには, ページ閲覧のログの他にどこまで 閲覧されたかを把握するために, JavaScriptで ログを送信する仕組みを用意する必要がある.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">SELECT</span>
+  url
+  , action
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  , <span class="dv">100</span>. 
+    * <span class="fu">COUNT</span>(<span class="dv">1</span>)
+    / <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> action = <span class="st">'view'</span> <span class="kw">THEN</span> <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+      <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> url)
+      <span class="kw">AS</span> action_per_view
+<span class="kw">FROM</span> read_log
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  url, action
+<span class="kw">ORDER</span> <span class="kw">BY</span>  
+  url, <span class="fu">count</span> <span class="kw">DESC</span>
 ;</code></pre></div>
 <div class="knitsql-table">
 <table>
 <caption>Displaying records 1 - 10</caption>
 <thead>
 <tr class="header">
-<th align="left">session</th>
-<th align="right">step</th>
-<th align="left">path</th>
-<th align="left">max_stamp</th>
-<th align="left">lag_min_stamp</th>
-<th align="right">min_step</th>
-<th align="right">cum_count</th>
+<th align="left">url</th>
+<th align="left">action</th>
+<th align="right">count</th>
+<th align="right">action_per_view</th>
 </tr>
 </thead>
 <tbody>
 <tr class="odd">
-<td align="left">0fe39581</td>
-<td align="right">2</td>
-<td align="left">/search_list</td>
-<td align="left">2017-01-09 12:18:43</td>
-<td align="left">NA</td>
-<td align="right">2</td>
+<td align="left"><a href="http://www.example.com/article?id=it605" class="uri">http://www.example.com/article?id=it605</a></td>
+<td align="left">read-20%</td>
 <td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="even">
-<td align="left">111f2996</td>
+<td align="left"><a href="http://www.example.com/article?id=it605" class="uri">http://www.example.com/article?id=it605</a></td>
+<td align="left">view</td>
 <td align="right">1</td>
-<td align="left">/</td>
-<td align="left">2017-01-09 12:20:10</td>
-<td align="left">NA</td>
-<td align="right">1</td>
-<td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="odd">
-<td align="left">111f2996</td>
-<td align="right">2</td>
-<td align="left">/search_list</td>
-<td align="left">2017-01-09 12:18:43</td>
-<td align="left">2017-01-09 12:20:10</td>
+<td align="left"><a href="http://www.example.com/article?id=news341" class="uri">http://www.example.com/article?id=news341</a></td>
+<td align="left">view</td>
 <td align="right">1</td>
-<td align="right">2</td>
+<td align="right">100</td>
 </tr>
 <tr class="even">
-<td align="left">1cf7678e</td>
+<td align="left"><a href="http://www.example.com/article?id=news731" class="uri">http://www.example.com/article?id=news731</a></td>
+<td align="left">read-40%</td>
 <td align="right">1</td>
-<td align="left">/</td>
-<td align="left">2017-01-09 12:19:04</td>
-<td align="left">NA</td>
-<td align="right">1</td>
-<td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="odd">
-<td align="left">36dd0df7</td>
-<td align="right">2</td>
-<td align="left">/search_list</td>
-<td align="left">2017-01-09 12:18:43</td>
-<td align="left">NA</td>
-<td align="right">2</td>
+<td align="left"><a href="http://www.example.com/article?id=news731" class="uri">http://www.example.com/article?id=news731</a></td>
+<td align="left">read-60%</td>
 <td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="even">
-<td align="left">47db0370</td>
-<td align="right">2</td>
-<td align="left">/search_list</td>
-<td align="left">2017-01-09 12:18:43</td>
-<td align="left">NA</td>
-<td align="right">2</td>
+<td align="left"><a href="http://www.example.com/article?id=news731" class="uri">http://www.example.com/article?id=news731</a></td>
+<td align="left">view</td>
 <td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="odd">
-<td align="left">87b5725f</td>
+<td align="left"><a href="http://www.example.com/article?id=news731" class="uri">http://www.example.com/article?id=news731</a></td>
+<td align="left">read-80%</td>
 <td align="right">1</td>
-<td align="left">/</td>
-<td align="left">2017-01-09 12:25:25</td>
-<td align="left">NA</td>
-<td align="right">1</td>
-<td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="even">
-<td align="left">87b5725f</td>
-<td align="right">2</td>
-<td align="left">/search_list</td>
-<td align="left">2017-01-09 12:22:51</td>
-<td align="left">2017-01-09 12:20:46</td>
+<td align="left"><a href="http://www.example.com/article?id=news731" class="uri">http://www.example.com/article?id=news731</a></td>
+<td align="left">read-100%</td>
 <td align="right">1</td>
-<td align="right">2</td>
+<td align="right">100</td>
 </tr>
 <tr class="odd">
-<td align="left">8cc03a54</td>
-<td align="right">2</td>
-<td align="left">/search_list</td>
-<td align="left">2017-01-09 12:18:43</td>
-<td align="left">NA</td>
-<td align="right">2</td>
+<td align="left"><a href="http://www.example.com/article?id=news731" class="uri">http://www.example.com/article?id=news731</a></td>
+<td align="left">read-20%</td>
 <td align="right">1</td>
+<td align="right">100</td>
 </tr>
 <tr class="even">
-<td align="left">8cc03a54</td>
+<td align="left"><a href="http://www.example.com/article?id=trend132" class="uri">http://www.example.com/article?id=trend132</a></td>
+<td align="left">view</td>
+<td align="right">1</td>
+<td align="right">100</td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>サイトの下部におすすめや関連記事を載せるモジュールは, あくまで読了されることを前提とされるため, 必ず読了率を集計するようにしよう.</p>
+</div>
+<div class="section level3">
+<h3>全体像の可視化</h3>
+<p>ここまで見てきたような集計値はユーザーの代表値である. そのため, ここから得られる知見や仮説は局所的なものであり, まさに「点」の情報といえる.</p>
+<p>点と点を結び線にし, 線を組み合わせて面にすることでユーザーの情報が見えてくる.</p>
+<p>要はＳＱＬや分析ツールで出す情報を組み合わせて, 「俯瞰図」を作成するように心がけよう.</p>
+</div>
+</div>
+</div>
+<div class="section level1">
+<h1>エントリーフォームを最適化</h1>
+<p>資料請求フォームや購入フォームなどをエントリーフォームと呼ぶ. ユーザーが途中で離脱してしまわないようにエントリーフォームを 最適化する取組をEFOと呼ぶ.</p>
+<div class="section level2">
+<h2>エラー率</h2>
+<p>入力漏れなどでエラーとなる場合がある. この場合にはＵＲＬで確認画面への 遷移率を計測することができない. 確認画面へ遷移した際にエラー表示を伴う入力画面の再表示なのか, 確認画面の表示なのか正しく集計できるようにログに出力する.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">SELECT</span>
+  *
+<span class="kw">FROM</span>
+  form_log
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>Displaying records 1 - 10</caption>
+<thead>
+<tr class="header">
+<th align="left">stamp</th>
+<th align="left">session</th>
+<th align="left">action</th>
+<th align="left">path</th>
+<th align="left">status</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">2016-12-30 00:56:08</td>
+<td align="left">647219c7</td>
+<td align="left">view</td>
+<td align="left">/regist/input</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left">2016-12-30 00:56:08</td>
+<td align="left">9b5f320f</td>
+<td align="left">view</td>
+<td align="left">/cart/input</td>
+<td align="left"></td>
+</tr>
+<tr class="odd">
+<td align="left">2016-12-30 00:57:04</td>
+<td align="left">9b5f320f</td>
+<td align="left">view</td>
+<td align="left">/regist/confirm</td>
+<td align="left">error</td>
+</tr>
+<tr class="even">
+<td align="left">2016-12-30 00:57:56</td>
+<td align="left">9b5f320f</td>
+<td align="left">view</td>
+<td align="left">/regist/confirm</td>
+<td align="left">error</td>
+</tr>
+<tr class="odd">
+<td align="left">2016-12-30 00:58:50</td>
+<td align="left">9b5f320f</td>
+<td align="left">view</td>
+<td align="left">/regist/confirm</td>
+<td align="left">error</td>
+</tr>
+<tr class="even">
+<td align="left">2016-12-30 01:00:19</td>
+<td align="left">9b5f320f</td>
+<td align="left">view</td>
+<td align="left">/regist/confirm</td>
+<td align="left">error</td>
+</tr>
+<tr class="odd">
+<td align="left">2016-12-30 00:56:08</td>
+<td align="left">8e9afadc</td>
+<td align="left">view</td>
+<td align="left">/contact/input</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left">2016-12-30 00:56:08</td>
+<td align="left">46b4c72c</td>
+<td align="left">view</td>
+<td align="left">/regist/input</td>
+<td align="left"></td>
+</tr>
+<tr class="odd">
+<td align="left">2016-12-30 00:57:31</td>
+<td align="left">46b4c72c</td>
+<td align="left">view</td>
+<td align="left">/regist/confirm</td>
+<td align="left"></td>
+</tr>
+<tr class="even">
+<td align="left">2016-12-30 00:56:08</td>
+<td align="left">539eb753</td>
+<td align="left">view</td>
+<td align="left">/contact/input</td>
+<td align="left"></td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">SELECT</span>
+  <span class="fu">COUNT</span>(*) <span class="kw">AS</span> confirm_count
+  , <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> status = <span class="st">'error'</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>) <span class="kw">AS</span> error_count
+  , <span class="fu">AVG</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> status = <span class="st">'error'</span> <span class="kw">THEN</span> <span class="dv">1</span>. <span class="kw">ELSE</span> <span class="dv">0</span>. <span class="kw">END</span>) <span class="kw">AS</span> error_rate
+  , <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> status = <span class="st">'error'</span> <span class="kw">THEN</span> <span class="dv">1</span>. <span class="kw">ELSE</span> <span class="dv">0</span>. <span class="kw">END</span>) / <span class="fu">COUNT</span>(<span class="kw">DISTINCT</span> <span class="kw">session</span>)
+    <span class="kw">AS</span> error_per_user
+<span class="kw">FROM</span>
+  form_log
+<span class="kw">WHERE</span>
+  path = <span class="st">'/regist/confirm'</span>
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>1 records</caption>
+<thead>
+<tr class="header">
+<th align="left">confirm_count</th>
+<th align="right">error_count</th>
+<th align="right">error_rate</th>
+<th align="right">error_per_user</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">5</td>
 <td align="right">4</td>
-<td align="left">/input</td>
-<td align="left">2017-01-09 12:18:44</td>
-<td align="left">2017-01-09 12:18:43</td>
-<td align="right">2</td>
+<td align="right">0.8</td>
 <td align="right">2</td>
 </tr>
 </tbody>
 </table>
+</div>
+</div>
+<div class="section level2">
+<h2>入力～確認～完了までの遷移</h2>
+<p>エントリーフォームの最適化をする際には, まずは「入力～確認～完了」までの フォールアウトレポートをざっと確認してみる.</p>
+<p>エントリーフォームの文脈ではCVRを完了画面まで遷移した割合, 100%-CVRを離脱率という.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+mst_fallout_step <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> <span class="dv">1</span> <span class="kw">AS</span> step, <span class="st">'/regist/input'</span> <span class="kw">AS</span> path
+  <span class="kw">UNION</span> <span class="kw">ALL</span> <span class="kw">SELECT</span> <span class="dv">2</span> <span class="kw">AS</span> step, <span class="st">'/regist/confirm'</span> <span class="kw">AS</span> path
+  <span class="kw">UNION</span> <span class="kw">ALL</span> <span class="kw">SELECT</span> <span class="dv">3</span> <span class="kw">AS</span> step, <span class="st">'/regist/complete'</span> <span class="kw">AS</span> path
+)
+, form_log_with_fallout_step <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    l.session
+  , m.step
+  , m.path
+  , <span class="fu">MAX</span>(l.stamp) <span class="kw">AS</span> max_stamp
+  , <span class="fu">MIN</span>(l.stamp) <span class="kw">AS</span> min_stamp
+  <span class="kw">FROM</span>
+    mst_fallout_step <span class="kw">AS</span> m
+    <span class="kw">JOIN</span>
+    form_log <span class="kw">AS</span> l
+    <span class="kw">ON</span> m.path = l.path
+  <span class="kw">WHERE</span>
+    status = <span class="st">''</span> <span class="co">-- errorでないレコード</span>
+  <span class="kw">GROUP</span> <span class="kw">BY</span> 
+    l.session, m.step, m.path
+)
+, form_log_with_mod_fallout_step <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">session</span>
+    , step
+    , path
+    , max_stamp
+    , <span class="fu">LAG</span>(min_stamp)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> step)
+        <span class="kw">AS</span> lag_min_stamp
+    , <span class="fu">MIN</span>(step) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span>) <span class="kw">AS</span> min_step
+    , <span class="fu">COUNT</span>(<span class="dv">1</span>)
+        <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> <span class="kw">session</span> <span class="kw">ORDER</span> <span class="kw">BY</span> step
+          <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+        <span class="kw">AS</span> cum_count
+  <span class="kw">FROM</span> form_log_with_fallout_step
+)
+, fallout_log <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> 
+    <span class="kw">session</span>
+    , step
+    , path
+  <span class="kw">FROM</span>
+    form_log_with_mod_fallout_step
+  <span class="kw">WHERE</span>
+    min_step = <span class="dv">1</span>
+    <span class="kw">AND</span> step = cum_count
+    <span class="kw">AND</span> (lag_min_stamp <span class="kw">IS</span> <span class="kw">NULL</span> <span class="kw">OR</span> max_stamp &gt;= lag_min_stamp)
+)
+<span class="kw">SELECT</span>
+  step
+  , path
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  <span class="co">-- ステップ順序1からの遷移率</span>
+  , <span class="dv">100</span>. * <span class="fu">COUNT</span>(<span class="dv">1</span>) 
+    / <span class="fu">FIRST_VALUE</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>))
+        <span class="kw">OVER</span>(<span class="kw">ORDER</span> <span class="kw">BY</span> step <span class="kw">ASC</span> <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">UNBOUNDED</span> <span class="kw">FOLLOWING</span>)
+          <span class="kw">AS</span> first_trans_rate
+  <span class="co">-- 直近のステップからの遷移率</span>
+  , <span class="dv">100</span>. * <span class="fu">COUNT</span>(<span class="dv">1</span>)
+    / <span class="fu">LAG</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>)) <span class="kw">OVER</span>(<span class="kw">ORDER</span> <span class="kw">BY</span> step <span class="kw">ASC</span>)
+    <span class="kw">AS</span> step_trans_rate
+<span class="kw">FROM</span>
+  fallout_log
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  step, path
+<span class="kw">ORDER</span> <span class="kw">BY</span>
+  step
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>2 records</caption>
+<thead>
+<tr class="header">
+<th align="left">step</th>
+<th align="left">path</th>
+<th align="right">count</th>
+<th align="right">first_trans_rate</th>
+<th align="right">step_trans_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">1</td>
+<td align="left">/regist/input</td>
+<td align="right">2</td>
+<td align="right">100</td>
+<td align="right">NA</td>
+</tr>
+<tr class="even">
+<td align="left">2</td>
+<td align="left">/regist/confirm</td>
+<td align="right">1</td>
+<td align="right">50</td>
+<td align="right">50</td>
+</tr>
+</tbody>
+</table>
+</div>
+<div class="section level3">
+<h3>フォーム直帰率</h3>
+<p>入力画面へ遷移した後, 入力開始や確認画面, エラー画面を表したゴルがない状態のレコードをカウントしたものを「フォーム直帰数」 と呼びます.</p>
+<p>まず, セッションごおｔに入力画面の訪問回数, 確認画面や完了画面の訪問回数をSUM構文を用いてカウントしてSIGN関数を使用してフラグに する. さらに入力画面を訪問しているセッションのみに絞り込み, 同様にSUM構文を用いて直帰数を計算し, AVG構文を用いて直帰率を計算する.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+form_with_progress_flag <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    substring(stamp, <span class="dv">1</span>, <span class="dv">10</span>) <span class="kw">AS</span> dt
+    , <span class="kw">session</span>
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path <span class="kw">IN</span> (<span class="st">'/regist/input'</span>) <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+    ) <span class="kw">AS</span> has_input
+    , <span class="fu">SIGN</span>(
+        <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> path <span class="kw">IN</span> (<span class="st">'/regist/confirm'</span>, <span class="st">'/regist/complete'</span>) <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>)
+    ) <span class="kw">AS</span> has_progress
+  <span class="kw">FROM</span> form_log
+  <span class="kw">GROUP</span> <span class="kw">BY</span>
+    dt, <span class="kw">session</span>
+)
+<span class="kw">SELECT</span>
+  dt
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> input_count
+  , <span class="fu">SUM</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> has_progress = <span class="dv">0</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>) <span class="kw">AS</span> bounce_count
+  , <span class="dv">100</span>. * <span class="fu">AVG</span>(<span class="kw">CASE</span> <span class="kw">WHEN</span> has_progress = <span class="dv">0</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span>) <span class="kw">AS</span> bounce_rate
+<span class="kw">FROM</span>
+  form_with_progress_flag
+<span class="kw">WHERE</span>
+  has_input = <span class="dv">1</span>
+<span class="kw">GROUP</span> <span class="kw">BY</span> 
+  dt
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>1 records</caption>
+<thead>
+<tr class="header">
+<th align="left">dt</th>
+<th align="right">input_count</th>
+<th align="right">bounce_count</th>
+<th align="right">bounce_rate</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">2016-12-30</td>
+<td align="right">2</td>
+<td align="right">1</td>
+<td align="right">50</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+<div class="section level3">
+<h3>エラーが発生している項目と内容</h3>
+<p>エラーが発生したら, 場当たり的な対応ではなく, 原因を追及し根拠を持って対応にあたることが重要である.</p>
+<p>このテーブルを作成するためのクエリには日本が含まれているためか 明示的にクライアントのエンコーディングをUTF-8にセットにないと作成できなかった.</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">SELECT</span>
+  form
+  , field 
+  , error_type 
+  , <span class="fu">COUNT</span>(<span class="dv">1</span>) <span class="kw">AS</span> <span class="fu">count</span>
+  , <span class="dv">100</span>. * <span class="fu">COUNT</span>(<span class="dv">1</span>) / <span class="fu">SUM</span>(<span class="fu">COUNT</span>(<span class="dv">1</span>)) <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> form) <span class="kw">AS</span> <span class="kw">share</span>
+<span class="kw">FROM</span>
+  form_error_log
+<span class="kw">GROUP</span> <span class="kw">BY</span>
+  form, field, error_type
+<span class="kw">ORDER</span> <span class="kw">BY</span>
+  form, <span class="fu">count</span> <span class="kw">DESC</span>
+;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>7 records</caption>
+<thead>
+<tr class="header">
+<th align="left">form</th>
+<th align="left">field</th>
+<th align="left">error_type</th>
+<th align="right">count</th>
+<th align="right">share</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">cart</td>
+<td align="left">tel</td>
+<td align="left">format_error</td>
+<td align="right">1</td>
+<td align="right">50.00000</td>
+</tr>
+<tr class="even">
+<td align="left">cart</td>
+<td align="left">email</td>
+<td align="left">format_error</td>
+<td align="right">1</td>
+<td align="right">50.00000</td>
+</tr>
+<tr class="odd">
+<td align="left">regist</td>
+<td align="left">kana</td>
+<td align="left">require</td>
+<td align="right">2</td>
+<td align="right">33.33333</td>
+</tr>
+<tr class="even">
+<td align="left">regist</td>
+<td align="left">zip</td>
+<td align="left">format_error</td>
+<td align="right">1</td>
+<td align="right">16.66667</td>
+</tr>
+<tr class="odd">
+<td align="left">regist</td>
+<td align="left">email</td>
+<td align="left">require</td>
+<td align="right">1</td>
+<td align="right">16.66667</td>
+</tr>
+<tr class="even">
+<td align="left">regist</td>
+<td align="left">email</td>
+<td align="left">format_error</td>
+<td align="right">1</td>
+<td align="right">16.66667</td>
+</tr>
+<tr class="odd">
+<td align="left">regist</td>
+<td align="left">kana</td>
+<td align="left">not_kana</td>
+<td align="right">1</td>
+<td align="right">16.66667</td>
+</tr>
+</tbody>
+</table>
+</div>
 </div>
 </div>
 </div>

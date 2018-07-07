@@ -1005,14 +1005,349 @@ mst_fallout_step AS(
   FROM
     activity_log_with_fallout_step
 )
-SELECT  
-  *
+, fallout_log AS (
+  SELECT 
+    session 
+    , step
+    , path
+  FROM
+    activity_log_with_mod_fallout_step
+  WHERE
+    min_step = 1
+    AND 
+    step = cum_count
+    AND
+    (lag_min_stamp IS NULL OR max_stamp >= lag_min_stamp)
+)
+SELECT 
+  step
+  , path
+  , COUNT(1) AS count
+  -- 度数を全体の度数で除している
+  -- 全体の度数を別途用意するのではなく, ウィンドウ関数を使っている
+  , 100. * COUNT(1)
+    / FIRST_VALUE(COUNT(1))
+    OVER(ORDER BY step ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+    AS first_trans_rate
+  -- 直前の度数で除すことで遷移率を求めている
+  , 100. * COUNT(1) 
+    / LAG(COUNT(1)) OVER(ORDER BY step ASC)
+    AS step_trans_rate
 FROM
-  activity_log_with_mod_fallout_step
-ORDER BY
-  session, step
+  fallout_log
+GROUP BY
+  step, path
+ORDER BY 
+  step
 ;
 ```
+## サイト内のユーザーフロー
+
+ユーザーのサイト内の回遊が, サイト作成者の意図と異なれば
+そこに改善の可能性がある. 
+
+この分析にはまず起点となるページを自分で決める. 
+
+- トップページからの遷移
+- 詳細画面の前後
+
+### 次のページを集計する
+
+```{sql 6.2.7.1}
+WITH
+activity_log_with_lead_path AS (
+  SELECT
+    session
+    , stamp
+    , path AS path0
+    -- 1後にアクセスしたパスを取得
+    , LEAD(path, 1) OVER(PARTITION BY session ORDER BY stamp ASC) AS path1
+    -- 2後にアクセスしたパスを取得
+    , LEAD(path, 2) OVER(PARTITION BY session ORDER BY stamp ASC) AS path2
+  FROM
+    activity_log
+)
+, raw_user_flow AS (
+  SELECT
+    path0
+    -- 起点となるパスへのアクセス数
+    , SUM(COUNT(1)) OVER() AS count0
+    -- 1つ後にアクセスしたパス
+    , COALESCE(path1, 'NULL') AS path1
+    -- 1つ後にアクセスしたパスのアクセス数
+    , SUM(COUNT(1)) OVER(PARTITION BY path0, path1) AS count1
+    -- 2つ後にアクセスしたパス
+    , COALESCE(path2, 'NULL') AS path2
+    -- 2つ後にアクセスしたパスへのアクセス数
+    , COUNT(1) AS count2
+  FROM
+    activity_log_with_lead_path
+  WHERE
+    path0 = '/detail'
+  GROUP BY 
+    path0, path1, path2
+)
+SELECT
+  path0
+  , count0
+  , path1
+  , count1
+  , 100. * count1 / count0 AS rate1
+  , path2
+  , count2
+  , 100. * count2 / count1 AS rate2
+FROM
+  raw_user_flow
+ORDER BY
+  count1 DESC
+  , count2 DESC
+;
+```
+
+この出力では, 重複したレコードが出力しないように
+出来る裸子が, CASE句を死ぬほど記述することになるので省略する. 
+
+
+### 前のページを集計
+
+次のページを集計するで, `LEAD`を`LAG`に変更することで対応ができる. 
+
+### ページの読了率
+
+どこで離脱したかを把握することで, 
+ユーザーがサイトに満足しているのかがわかる. 
+
+読了率を調べるには, ページ閲覧のログの他にどこまで
+閲覧されたかを把握するために, JavaScriptで
+ログを送信する仕組みを用意する必要がある. 
+
+```{sql 6.2.8.1}
+SELECT
+  url
+  , action
+  , COUNT(1) AS count
+  , 100. 
+    * COUNT(1)
+    / SUM(CASE WHEN action = 'view' THEN COUNT(1) ELSE 0 END)
+      OVER(PARTITION BY url)
+      AS action_per_view
+FROM read_log
+GROUP BY
+  url, action
+ORDER BY  
+  url, count DESC
+;
+```
+
+サイトの下部におすすめや関連記事を載せるモジュールは, 
+あくまで読了されることを前提とされるため, 
+必ず読了率を集計するようにしよう. 
+
+
+### 全体像の可視化
+
+ここまで見てきたような集計値はユーザーの代表値である. 
+そのため, ここから得られる知見や仮説は局所的なものであり, 
+まさに「点」の情報といえる. 
+
+点と点を結び線にし, 線を組み合わせて面にすることでユーザーの情報が見えてくる.
+
+要はＳＱＬや分析ツールで出す情報を組み合わせて, 
+「俯瞰図」を作成するように心がけよう. 
+
+
+# エントリーフォームを最適化
+
+資料請求フォームや購入フォームなどをエントリーフォームと呼ぶ. 
+ユーザーが途中で離脱してしまわないようにエントリーフォームを
+最適化する取組をEFOと呼ぶ. 
+
+## エラー率
+
+入力漏れなどでエラーとなる場合がある. この場合にはＵＲＬで確認画面への
+遷移率を計測することができない. 
+確認画面へ遷移した際にエラー表示を伴う入力画面の再表示なのか, 
+確認画面の表示なのか正しく集計できるようにログに出力する. 
+
+```{sql}
+SELECT
+  *
+FROM
+  form_log
+;
+```
+
+
+```{sql 6.3.1.1}
+SELECT
+  COUNT(*) AS confirm_count
+  , SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS error_count
+  , AVG(CASE WHEN status = 'error' THEN 1. ELSE 0. END) AS error_rate
+  , SUM(CASE WHEN status = 'error' THEN 1. ELSE 0. END) / COUNT(DISTINCT session)
+    AS error_per_user
+FROM
+  form_log
+WHERE
+  path = '/regist/confirm'
+;
+
+
+```
+
+
+## 入力～確認～完了までの遷移
+
+エントリーフォームの最適化をする際には, まずは「入力～確認～完了」までの
+フォールアウトレポートをざっと確認してみる. 
+
+エントリーフォームの文脈ではCVRを完了画面まで遷移した割合, 
+100%-CVRを離脱率という. 
+
+```{sql 6.3.2.1}
+WITH
+mst_fallout_step AS (
+  SELECT 1 AS step, '/regist/input' AS path
+  UNION ALL SELECT 2 AS step, '/regist/confirm' AS path
+  UNION ALL SELECT 3 AS step, '/regist/complete' AS path
+)
+, form_log_with_fallout_step AS (
+  SELECT
+    l.session
+  , m.step
+  , m.path
+  , MAX(l.stamp) AS max_stamp
+  , MIN(l.stamp) AS min_stamp
+  FROM
+    mst_fallout_step AS m
+    JOIN
+    form_log AS l
+    ON m.path = l.path
+  WHERE
+    status = '' -- errorでないレコード
+  GROUP BY 
+    l.session, m.step, m.path
+)
+, form_log_with_mod_fallout_step AS (
+  SELECT
+    session
+    , step
+    , path
+    , max_stamp
+    , LAG(min_stamp)
+        OVER(PARTITION BY session ORDER BY step)
+        AS lag_min_stamp
+    , MIN(step) OVER(PARTITION BY session) AS min_step
+    , COUNT(1)
+        OVER(PARTITION BY session ORDER BY step
+          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+        AS cum_count
+  FROM form_log_with_fallout_step
+)
+, fallout_log AS (
+  SELECT 
+    session
+    , step
+    , path
+  FROM
+    form_log_with_mod_fallout_step
+  WHERE
+    min_step = 1
+    AND step = cum_count
+    AND (lag_min_stamp IS NULL OR max_stamp >= lag_min_stamp)
+)
+SELECT
+  step
+  , path
+  , COUNT(1) AS count
+  -- ステップ順序1からの遷移率
+  , 100. * COUNT(1) 
+    / FIRST_VALUE(COUNT(1))
+        OVER(ORDER BY step ASC ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+          AS first_trans_rate
+  -- 直近のステップからの遷移率
+  , 100. * COUNT(1)
+    / LAG(COUNT(1)) OVER(ORDER BY step ASC)
+    AS step_trans_rate
+FROM
+  fallout_log
+GROUP BY
+  step, path
+ORDER BY
+  step
+;
+```
+
+
+### フォーム直帰率
+
+入力画面へ遷移した後, 入力開始や確認画面, 
+エラー画面を表したゴルがない状態のレコードをカウントしたものを「フォーム直帰数」
+と呼びます.
+
+まず, セッションごおｔに入力画面の訪問回数, 
+確認画面や完了画面の訪問回数をSUM構文を用いてカウントしてSIGN関数を使用してフラグに
+する. さらに入力画面を訪問しているセッションのみに絞り込み, 
+同様にSUM構文を用いて直帰数を計算し, AVG構文を用いて直帰率を計算する.
+
+```{sql 6.3.3.1}
+WITH
+form_with_progress_flag AS (
+  SELECT
+    substring(stamp, 1, 10) AS dt
+    , session
+    , SIGN(
+        SUM(CASE WHEN path IN ('/regist/input') THEN 1 ELSE 0 END)
+    ) AS has_input
+    , SIGN(
+        SUM(CASE WHEN path IN ('/regist/confirm', '/regist/complete') THEN 1 ELSE 0 END)
+    ) AS has_progress
+  FROM form_log
+  GROUP BY
+    dt, session
+)
+SELECT
+  dt
+  , COUNT(1) AS input_count
+  , SUM(CASE WHEN has_progress = 0 THEN 1 ELSE 0 END) AS bounce_count
+  , 100. * AVG(CASE WHEN has_progress = 0 THEN 1 ELSE 0 END) AS bounce_rate
+FROM
+  form_with_progress_flag
+WHERE
+  has_input = 1
+GROUP BY 
+  dt
+;
+```
+
+
+
+### エラーが発生している項目と内容
+
+エラーが発生したら, 場当たり的な対応ではなく, 
+原因を追及し根拠を持って対応にあたることが重要である. 
+
+このテーブルを作成するためのクエリには日本が含まれているためか
+明示的にクライアントのエンコーディングをUTF-8にセットにないと作成できなかった.
+
+
+```{sql 6.3.4.1 }
+SELECT
+  form
+  , field 
+  , error_type 
+  , COUNT(1) AS count
+  , 100. * COUNT(1) / SUM(COUNT(1)) OVER(PARTITION BY form) AS share
+FROM
+  form_error_log
+GROUP BY
+  form, field, error_type
+ORDER BY
+  form, count DESC
+;
+```
+
+
+
 
 
 
