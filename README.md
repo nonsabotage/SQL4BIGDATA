@@ -12,4 +12,4 @@
 - [ユーザーを把握するためのデータ抽出](5-extract-data-for-understanding-user.html)
 - [Webサイトでの行動を把握するためのデータ抽出](6-extract-data-of-user-action.html)
 - [データ活用の精度を高めるための分析術](7-arts-of-increase-accuracy.html)
-- [データを武器にするための分析術](8-data-as-gan.Rmd)s
+- [データを武器にするための分析術](8-data-as-gan.html)
