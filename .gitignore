@@ -5,3 +5,5 @@ sql/*
 config.yaml
 *.RData
 *.Rhistory
+dat/*
+7-arts-of-increase-accuracy_cache

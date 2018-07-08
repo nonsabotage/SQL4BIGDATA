@@ -1,0 +1,925 @@
+---
+title: "Ch7 データ活用のための精度を高めるための分析術"
+output: 
+    html_document:
+        toc: true
+        toc_float: true
+        highlight: tango
+        theme: flatly
+        css: mycss.css
+        code_folding: show
+        include:
+            - in_header: in_head.html
+        df_print: "paged"
+  
+---
+
+自らのデータを加工する手段を取得することでデータの不足やノイズなどの
+困難な状況を解消し, 目的の分析を正しく実行できるスキル. 
+
+# コネクションの設定
+
+```{r setup, message=FALSE}
+
+## load libs
+libs <- c( "DBI", "RPostgreSQL",  "purrr", "dplyr", "yaml" )
+for( lib in libs ) {
+    library( lib, character.only=TRUE )  
+} 
+
+## connection db
+config <-
+  read_yaml("config.yaml") %>%
+  update_list( drv =  ~  dbDriver(drv))
+con <- lift(dbConnect)(config)
+knitr::opts_chunk$set(connection = "con")
+```
+
+# 組合わせによる新たな切り口
+
+## IPアドレスから地域を補完
+
+ＩＰから国や地域を推定する. 
+ここでは無料で利用できるジオロケーションデータベースを用いて
+ＩＰアドレスから国や地域の情報を補完する. 
+
+次のテーブルはIPアドレスを含むアクションログテーブル.
+
+```{sql}
+SELECT
+  *
+FROM
+  action_log_with_ip
+;
+```
+
+### GeoLite2のデータロード
+
+[MaxMind](https://www.maxmind.com)が提供する無料の
+ジオロケーションデータベースが「[GeoLite2](https://dev.maxmind.com/geoip/geoip2/geolite2/)」である. 
+月１度程度更新されているＣＳＶファイル. ここでは「GeoLite2-City-Blocks-IPv4.csv」と
+「GeoLite2-City-Locations-en.csv」を津悪.
+
+- GeoLite2 Country は国まで
+- GeoLite2 City は都市まで
+
+CSVファイルのGeo2LiteをPostgresにインポートするsqlは次の通り.  
+sqlは別途実行する. 
+
+
+### IPから国や地域情報を補完
+
+```{sql cache=TRUE}
+SELECT
+  a.ip
+  , l.continent_name
+  , l.country_name
+  , l.city_name
+  , l.time_zone
+FROM
+  action_log_with_ip AS a
+  LEFT OUTER JOIN
+    mst_city_ip AS i
+    ON a.ip::inet << i.network
+  LEFT OUTER JOIN
+    mst_locations AS l
+    ON i.geoname_id = l.geoname_id
+;
+```
+
+
+## 隣接都道府県
+
+都道府県単位でユーザーの行動を分解しようとすると, 大阪→東京といったような
+単位を分析することとなるが, これでは大局的なユーザーの行動を
+捉えることが難しくなる. 
+
+そこで, 同一都道府県, 隣接都道府県, 遠方都道府県の３つの粒度集計すると
+わかりやすくなる. 
+
+### マスターデータ
+
+
+```{sql}
+set client_encoding='SJIS';
+SELECT * FROM neighbor_pref;
+```
+
+```{sql}
+set client_encoding='SJIS';
+SELECT * FROM reservations;
+```
+
+### マスターデータのカテゴライズ
+
+
+隣接都道府県のデータと, 予約データを用いて宿泊先の
+都道府県をカテゴライズするクエリ
+
+```{sql}
+WITH 
+rsv_with_category AS (
+  SELECT
+    r.rsv_id
+    , r.member_id
+    , r.member_pref_name
+    , r.spot_pref_name
+    , CASE r.spot_pref_id
+        WHEN r.member_pref_id THEN 'same'
+        WHEN n.neighbor_pref_id THEN 'neighbor'
+        ELSE 'far'
+      END AS category
+  FROM
+    reservations AS r
+    LEFT OUTER  JOIN
+      neighbor_pref AS n
+      ON r.member_pref_id = n.pref_id
+      AND r.spot_pref_id = n.neighbor_pref_id
+)
+SELECT * FROM rsv_with_category;
+```
+
+
+ユーザー行動は曜日やシーズンで変わるので, 
+これに時間軸を加えるとより詳細な分析が可能となる. 
+
+## 土日・祝日を判断
+
+データの変動が曜日効果であるかを, カレンダーから確認せず, 
+データで判断可能な状態を設計しておく.
+
+### サンプルデータ
+
+```{sql}
+SELECT * FROM access_log;
+```
+
+### 祝日情報を取り組む
+
+土日は判定できるが, 祝日は判定できない. 
+ここでは
+「[カレンダーサービス](http://calendar-service.net/api.php)」
+から, カレンダー・祝日データをＡＰＩ経由で取得する. 
+
+
+
+
+```{sql}
+SELECT * FROM mst_calendar;
+```
+
+
+
+```{sql}
+SELECT
+  a.action
+  , a.stamp
+  , c.dow
+  , c.holiday_name
+  , c.dow_num IN (0, 6) -- 土日
+    OR c.holiday_name IS NOT NULL
+    AS is_day_off
+FROM
+  action_log AS a
+  JOIN
+    mst_calendar AS c
+    ON CAST(substring(a.stamp, 1, 4) AS int) = c.year
+    AND CAST(substring(a.stamp, 6, 2) AS int) = c.month
+    AND CAST(substring(a.stamp, 9, 2) AS int) = c.day;
+```
+
+
+## 1日の集計範囲を変更
+
+日付で集計をすると, 日をまたぐときのユーザーの行動が
+見えづらくなってくる. 
+このため通常はユーザーの行動が最も抑えられる時間帯を決めて, 
+そこで1日が変わるように変更をしておきたい.
+
+### サンプルデータ
+
+```{sql}
+SELECT * FROM action_log;
+```
+
+
+### 1日の集計範囲を変更
+
+もとのデータを変更してしまわないように注意する. 
+
+
+```{sql}
+WITH
+action_log_with_mod_stamp AS (
+  SELECT *
+  , CAST(stamp::timestamp - '4 hours'::interval AS text) AS mod_stamp
+  FROM action_log
+)
+SELECT
+  session
+  , user_id
+  , action
+  , stamp
+  , substring(stamp, 1, 10) AS raw_date
+  , substring(mod_stamp, 1, 10) AS mod_date
+FROM action_log_with_mod_stamp;
+```
+
+# 異常値を検出
+
+ノイズとなる異常値を含むデータを検出し, 
+データ分析の前にクレンジングをすｒ. 
+
+
+
+```{sql}
+SELECT * FROM action_log_with_noise;
+```
+
+## データの分布を計算
+
+分布を求めて最も当てはまりが悪いデータを
+異常値とするのが, 最も簡便な検出方法. 
+
+
+### セッションあたりのページ閲覧数ランキング
+
+１セッションでページ閲覧数が極端に多い
+ユーザーを検出する. 
+
+```{sql}
+WITH
+session_count AS (
+  SELECT
+    session
+    , COUNT(1) AS count
+  FROM
+    action_log_with_noise
+  GROUP BY
+    session
+)
+SELECT
+  session
+  , count
+  , RANK() OVER(ORDER BY count DESC) AS rank
+  , PERCENT_RANK() OVER(ORDER BY count DESC) AS percent_rank
+FROM
+  session_count
+;
+```
+
+
+
+### URLのページビューのワーストランキング
+
+同様にURLのアクセス数ワーストランキングを割合で表示する. 
+
+```{sql}
+WITH
+url_count AS (
+  SELECT
+    url
+    , COUNT(*) AS count
+  FROM
+    action_log_with_noise
+  GROUP BY
+    url
+)
+SELECT
+  url
+  , count
+  , RANK() OVER(ORDER BY count ASC) AS rank
+  , PERCENT_RANK() OVER(ORDER BY count ASC)
+FROM
+  url_count
+;
+
+```
+
+## クローラーを除外
+
+アクセスログにはユーザーによるものだけでなく, 
+各種ツール,　つまりクローラーによるアクセスがある. 
+これらは分析を行う上ではノイズとなるため除外したい. 
+
+### 除外する方法
+
+- ルールベースによる除外
+- マスタデータによる除外
+
+前者のクエリは省略. WHERE句で`LIKE`を駆使して
+ルールを記述していく. 
+
+以下のクエリはマスターデータを用いて除外するクエリ. 
+
+
+
+```{sql}
+WITH
+mst_bot_user_agent AS (
+  SELECT '%bot%' AS rule
+  UNION ALL SELECT '%crawler%' AS rule
+  UNION ALL SELECT '%spider%' AS rule
+  UNION ALL SELECT '%archiver%' AS rule
+)
+, filtered_action_log AS (
+  SELECT
+    l.stamp, l.session, l.action, l.products
+    , l.url, l.ip, l.user_agent
+  FROM
+    action_log_with_noise AS l
+  WHERE
+    NOT EXISTS (
+      SELECT 1
+      FROM mst_bot_user_agent AS m
+      WHERE
+        l.user_agent LIKE m.rule
+    ) 
+)
+SELECT * FROM filtered_action_log;
+```
+
+相関サブクエリを使わない場合には`CROSS JOIN`と`HAVING`句を使う. 
+`HAVING`は`GROUP BY`された状態に対する`WHERE`句. 
+
+```{sql}
+WITH
+mst_bot_user_agent AS (
+  SELECT '%bot%' AS rule
+  UNION ALL SELECT '%crawler%' AS rule
+  UNION ALL SELECT '%spider%' AS rule
+  UNION ALL SELECT '%archiver%' AS rule
+)
+, filtered_action_log AS (
+  SELECT
+    l.stamp, l.session, l.action, l.products
+    , l.url, l.ip, l.user_agent
+  FROM
+    action_log_with_noise AS l
+    CROSS JOIN
+    mst_bot_user_agent AS m
+    GROUP BY 
+      l.stamp, l.session, l.action, l.products
+      , l.url, l.ip, l.user_agent
+    HAVING SUM(CASE WHEN l.user_agent LIKE m.rule THEN 1 ELSE 0 END) = 0
+)
+SELECT * FROM filtered_action_log;
+```
+
+### クローラーを監視する
+
+クローラーを除外する方法を決めたら, 
+その方法をルールやマスタに追加すべきクローラーが発生していないかを確認する
+必要がある.
+
+```{sql}
+
+WITH
+mst_bot_user_agent AS (
+  SELECT '%bot%' AS rule
+  UNION ALL SELECT '%crawler%' AS rule
+  UNION ALL SELECT '%spider%' AS rule
+  UNION ALL SELECT '%archiver%' AS rule
+)
+, filtered_action_log AS (
+  SELECT
+    l.stamp, l.session, l.action, l.products
+    , l.url, l.ip, l.user_agent
+  FROM
+    action_log_with_noise AS l
+    CROSS JOIN
+    mst_bot_user_agent AS m
+    GROUP BY 
+      l.stamp, l.session, l.action, l.products
+      , l.url, l.ip, l.user_agent
+    HAVING SUM(CASE WHEN l.user_agent LIKE m.rule THEN 1 ELSE 0 END) = 0
+)
+SELECT
+  user_agent
+  , COUNT(1) AS count
+  , 100. 
+    * SUM(COUNT(1)) OVER(ORDER BY COUNT(1) DESC
+      ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+      / SUM(COUNT(1)) OVER() AS cumulative_ratio
+  FROM
+    filtered_action_log
+  GROUP BY
+    user_agent
+  ORDER BY
+    count DESC
+;
+
+```
+
+## データの妥当性
+
+そもそもログデータに欠損や間違いはないのかを確認する. 
+
+```{sql}
+SELECT * FROM invalid_action_log;
+```
+
+アクションの種類によって必要となる属性がことなる. 
+ここではアクションごとに必要な属性が含まれているのかを確認する. 100%が理想の状態となるように
+集計をしてみる. 
+
+```{sql}
+SELECT 
+  action
+  
+  , AVG(CASE WHEN session IS NOT NULL THEN 1. ELSE 0. END) AS session
+  
+  , AVG(CASE WHEN user_id IS NOT NULL THEN 1. ELSE 0. END) AS user_is
+
+  , AVG(
+      CASE action 
+        WHEN 'view' THEN 
+          CASE WHEN category IS NULL THEN 1. ELSE 0. END
+        ELSE
+          CASE WHEN category IS NOT NULL THEN 1. ELSE 0. END
+      END
+  ) AS category
+
+  , AVG(
+      CASE action
+        WHEN 'view' THEN 
+          CASE WHEN products IS NULL THEN 1. ELSE 0. END
+        ELSE
+          CASE WHEN products IS NOT NULL THEN 1. ELSE 0. END
+      END
+  ) AS products
+
+  , AVG(
+      CASE action
+        WHEN 'purchase' THEN 
+          CASE WHEN amount IS NOT NULL THEN 1. ELSE 0. END
+        ELSE
+          CASE WHEN amount IS NULL THEN 1. ELSE 0. END
+      END
+  ) AS amount
+
+  , AVG(CASE WHEN stamp IS NOT NULL THEN 1. ELSE 0. END) AS stamp
+
+
+FROM  invalid_action_log
+GROUP BY action
+;
+```
+
+
+
+
+## 特定IPアドレスからアクセスを除外
+
+正規のサービスからのアクセスでないログは
+除外して分析することが重要
+
+### サンプルデータ
+
+```{sql}
+SELECT * FROM action_log_with_ip;
+```
+
+
+### 特定IPアドレスを除外
+
+
+```{sql}
+WITH
+mst_reserved_ip AS (
+  SELECT '127.0.0.9/8' AS network, 'localhost' AS description
+  UNION ALL SELECT '10.0.0.0/8' AS network, 'Private network' AS description
+  UNION ALL SELECT '172.16.0.0/12' AS network, 'Private network' AS description
+  UNION ALL SELECT '192.0.0.0/24' AS network, 'Private network' AS description
+  UNION ALL SELECT '192.168.0.0/16' AS network, 'Private network' AS description
+)
+, action_log_with_reserved_ip AS (
+  SELECT
+    l.user_id
+    , l.ip
+    , l.stamp
+    , m.network
+    , m.description
+  FROM
+    action_log_with_ip AS l
+    LEFT OUTER JOIN
+      mst_reserved_ip AS m
+    ON l.ip::inet << m.network::inet
+)
+SELECT * FROM action_log_with_reserved_ip;
+```
+
+
+
+# データの重複を検出
+
+## マスタデータの重複
+
+### キーが重複している場合
+
+マスタデータが重複するのは, 例えば次がおこったことが考えられる. 
+
+- データをロードする際に誤って複数回ロードしてしまい, 同じデータがロード
+- 古いバージョンが残っている
+- ヒューマンエラーで同じ値を入力した
+
+つぎのクエリでは全体の行数と, ユニークであるべきid変数の水準数を比較している.
+
+```{sql}
+SELECT
+  COUNT(1) AS total_num
+  , COUNT(DISTINCT id) AS key_num
+FROM
+  mst_categories
+;
+```
+
+### 重複しているレコードの抽出
+
+```{sql}
+SELECT
+  id, COUNT(*) AS record_num
+  , string_agg(name, ',') AS name_list
+  , string_agg(stamp, ',') AS stamp_list
+FROM
+  mst_categories
+GROUP BY id
+HAVING COUNT(*) > 1
+;
+```
+
+
+### ログの重複を検出
+
+
+ログについては正常な場合でも, ２度取得する可能性がある. 
+
+### サンプルデータ
+
+
+```{sql}
+SELECT * FROM dup_action_log;
+```
+
+### 重複データ
+
+```{sql}
+SELECT
+  user_id
+  , products
+  , string_agg(session, ',') AS session_list
+  , string_agg(stamp, ',') AS stamp_list
+FROM
+  dup_action_log
+GROUP BY 
+  user_id, products
+HAVING
+  COUNT(*) > 1
+;
+```
+
+
+### 重複の削除
+
+同一セッションＩＤで同一商品に対する同一アクションの場合には
+タイムスタンプが最も古いデータを残す方針とする.
+
+```{sql}
+SELECT
+  session
+  , user_id
+  , action
+  , products
+  , MIN(stamp) AS stamp
+FROM 
+  dup_action_log
+GROUP BY
+  session, user_id, action, products
+;
+```
+
+別解としては, ROW NUMBERを振って, 一番古いデータを判定する方法がある. 
+
+```{sql}
+WITH
+  dup_action_log_with_order_num AS (
+    SELECT
+      *
+      , ROW_NUMBER() OVER(
+          PARTITION BY session, user_id, action, products
+          ORDER BY stamp
+      ) AS order_num
+    FROM 
+      dup_action_log
+  )
+SELECT
+  session
+  , user_id
+  , action
+  , products
+  , stamp
+FROM
+  dup_action_log_with_order_num
+WHERE
+  order_num = 1
+;
+```
+
+さらに別解. sessionIDがないことがありうる. 
+そこで, タイムスタンプを使ってアクションの時間差を求め, 
+一定の時間間隔以下のアクションは同一セッションとして扱う方法がある. 
+NULLの場合も対象になるので, 先にNULLに対してフィルターを
+かけていることに注意.
+
+```{sql}
+WITH
+dup_action_log_with_lag_seconds AS (
+  SELECT
+    user_id
+    , action
+    , products
+    , stamp
+    , EXTRACT(epoch from stamp::timestamp - LAG(stamp::timestamp)
+        OVER(PARTITION BY user_id, action, products ORDER BY stamp)
+      ) AS lag_seconds
+  FROM
+    dup_action_log
+)
+SELECT * FROM dup_action_log_with_lag_seconds
+WHERE (lag_seconds IS NULL OR lag_seconds >= 30 * 60)
+ORDER BY stamp;
+```
+
+
+# 複数のデータセットを比較
+
+
+## 差分を抽出
+
+### 追加されたデータ
+
+
+```{sql}
+SELECT
+  new_mst.*
+FROM
+    mst_products_20170101 AS new_mst
+  LEFT OUTER JOIN
+    mst_products_20161201 AS old_mst
+  ON
+    new_mst.product_id = old_mst.product_id
+WHERE
+  old_mst.product_id IS NULL
+;
+```
+
+### 削除されたデータ
+
+上記のデータを`RIGHT JOIN`にすれば良い. 
+
+```{sql}
+SELECT
+  new_mst.*
+FROM
+    mst_products_20170101 AS new_mst
+  LEFT OUTER JOIN
+    mst_products_20161201 AS old_mst
+  ON
+    new_mst.product_id = old_mst.product_id
+WHERE
+  old_mst.product_id IS NULL
+;
+```
+
+### 更新されたデータ
+
+
+`INNER JOIN`をした後に, OLDとNEWで
+値が異なるデータを抽出. 
+
+```{sql}
+SELECT
+  new_mst.product_id
+  , old_mst.name AS old_name
+  , old_mst.price AS old_price
+  , new_mst.name AS new_name
+  , new_mst.price AS new_price
+  , new_mst.updated_at
+FROM
+    mst_products_20170101 AS new_mst
+  INNER JOIN
+    mst_products_20161201 AS old_mst
+  ON
+    new_mst.product_id = old_mst.product_id
+WHERE
+  new_mst.updated_at <> old_mst.updated_at
+;
+```
+
+
+
+## 2つのランキングの類似度
+
+アクセスログから算出できる指標は様々あり,　それぞれにランキングが作成できる.
+
+### 指標ごとのランキング
+
+```{sql}
+WITH
+path_stat AS (
+  SELECT
+    path
+    , COUNT(DISTINCT long_session) AS access_users
+    , COUNT(DISTINCT short_session) AS access_count
+    , COUNT(*) AS page_view
+  FROM
+    access_log
+  GROUP BY
+    path
+)
+, path_ranking AS (
+  SELECT
+    'access_user' AS type , path, RANK() OVER(ORDER BY access_users DESC) AS rank
+  FROM 
+    path_stat
+  UNION ALL
+  SELECT 
+    'access_count' AS type, path, RANK() OVER(ORDER BY access_count DESC) AS rank
+  FROM
+    path_stat
+  UNION ALL
+  SELECT
+    'page_view' AS type, path, RANK() OVER(ORDER BY page_view DESC) AS rank
+  FROM
+    path_stat
+)
+SELECT * FROM path_ranking ORDER BY type, rank
+;
+```
+
+
+### ランキング順位の差分
+
+ランキング順位の差分を両者の順位の2乗と定義して計算してみる. 
+
+
+```{sql}
+WITH
+path_stat AS (
+  SELECT
+    path
+    , COUNT(DISTINCT long_session) AS access_users
+    , COUNT(DISTINCT short_session) AS access_count
+    , COUNT(*) AS page_view
+  FROM
+    access_log
+  GROUP BY
+    path
+)
+, path_ranking AS (
+  SELECT
+    'access_user' AS type , path, RANK() OVER(ORDER BY access_users DESC) AS rank
+  FROM 
+    path_stat
+  UNION ALL
+  SELECT 
+    'access_count' AS type, path, RANK() OVER(ORDER BY access_count DESC) AS rank
+  FROM
+    path_stat
+  UNION ALL
+  SELECT
+    'page_view' AS type, path, RANK() OVER(ORDER BY page_view DESC) AS rank
+  FROM
+    path_stat
+)
+, pair_ranking AS (
+  SELECT
+    r1.path
+    , r1.type AS type1
+    , r1.rank AS rank1
+    , r2.type AS type2
+    , r2.rank AS rank2
+    , POWER(r1.rank - r2.rank, 2 ) AS diff
+  FROM
+    path_ranking AS r1
+    JOIN
+      path_ranking AS r2
+      ON r1.path = r2.path
+)
+SELECT * FROM pair_ranking;
+```
+
+
+### スピアマンの順位相関係数
+
+
+
+```{sql}
+WITH
+path_stat AS (
+  SELECT
+    path
+    , COUNT(DISTINCT long_session) AS access_users
+    , COUNT(DISTINCT short_session) AS access_count
+    , COUNT(*) AS page_view
+  FROM
+    access_log
+  GROUP BY
+    path
+)
+, path_ranking AS (
+  SELECT
+    'access_user' AS type , path, RANK() OVER(ORDER BY access_users DESC) AS rank
+  FROM 
+    path_stat
+  UNION ALL
+  SELECT 
+    'access_count' AS type, path, RANK() OVER(ORDER BY access_count DESC) AS rank
+  FROM
+    path_stat
+  UNION ALL
+  SELECT
+    'page_view' AS type, path, RANK() OVER(ORDER BY page_view DESC) AS rank
+  FROM
+    path_stat
+)
+, pair_ranking AS (
+  SELECT
+    r1.path
+    , r1.type AS type1
+    , r1.rank AS rank1
+    , r2.type AS type2
+    , r2.rank AS rank2
+    , POWER(r1.rank - r2.rank, 2 ) AS diff
+  FROM
+    path_ranking AS r1
+    JOIN
+      path_ranking AS r2
+      ON r1.path = r2.path
+)
+SELECT
+  type1
+  , type2
+  , 1 - (6 * sum(diff) / (POWER(COUNT(1), 3) - COUNT(1))) AS spearman
+FROM 
+  pair_ranking
+GROUP BY
+  type1, type2
+ORDER BY
+  type1 DESC, type2 DESC
+;
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# コネクションの削除
+
+```{r echo = FALSE, message = FALSE, warning = FALSE }
+dbDisconnect( con )
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
