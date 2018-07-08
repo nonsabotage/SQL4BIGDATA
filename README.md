@@ -11,3 +11,5 @@
 - [売上を把握するためのデータ抽出](4-extract-data-for-grasp-sales.html)
 - [ユーザーを把握するためのデータ抽出](5-extract-data-for-understanding-user.html)
 - [Webサイトでの行動を把握するためのデータ抽出](6-extract-data-of-user-action.html)
+- [データ活用の精度を高めるための分析術](7-7-arts-of-increase-accuracy.html)
+
