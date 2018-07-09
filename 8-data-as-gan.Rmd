@@ -553,18 +553,163 @@ SELECT * FROM search_result_with_precision ORDER BY keyword, rank;
 
 
 
+## 検索結果の順位を考慮した指標
+
+### MAP
+
+Mean Average Precision とは
+「それぞれの正解アイテムがランキング中に初めて登場した順位における適合率の平均」
+
+```{sql}
+WITH
+search_result_with_correct_items AS (
+  SELECT
+    COALESCE(r.keyword, c.keyword) AS keyword
+    , r.rank
+    , COALESCE(r.item, c.item) AS item
+    , CASE WHEN c.item IS NOT NULL THEN 1 ELSE 0 END AS correct
+  FROM
+    search_result AS r
+    FULL OUTER JOIN
+      correct_result AS c
+      ON r.keyword = c.keyword
+      AND r.item = c.item
+)
+, search_result_with_precision AS (
+  SELECT *
+  , SUM(correct)
+    OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 10000) ASC
+    ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_correct
+  , CASE
+    WHEN rank IS NULL THEN .0
+    ELSE
+      100. 
+      * SUM(correct)
+          OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 10000) ASC
+            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+          / COUNT(1) 
+              OVER(PARTITION BY keyword ORDER BY COALESCE(rank, 10000) ASC
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+    END AS precision
+  FROM
+    search_result_with_correct_items
+)
+, average_precision_for_keywords AS (
+  SELECT
+    keyword
+    , AVG(precision) AS average_precision
+  FROM
+    search_result_with_precision
+  WHERE
+    correct = 1
+  GROUP BY
+    keyword
+)
+SELECT * FROM average_precision_for_keywords;
+
+```
+
+# データマイニング
+
+本来はＲやＰｙｔｈｏｎを用いるが, 
+ここではあえてＳＱＬで**アソシエーション**分析に取り組むことで
+データマイニング手法の理解を進める.
+
+```{sql}
+SELECT * FROM purchase_detail_log LIMIT 10 ;
+```
 
 
+## アソシエーション分析
+
+- 支持度
+- 確信度・信頼度
+- リフト
+
+### 2種類の関連について
+
+```{sql}
+WITH
+purchase_id_count AS (
+  SELECT COUNT(DISTINCT purchase_id) AS purchase_count
+  FROM  purchase_detail_log
+)
+, purchase_detail_log_with_counts AS (
+  SELECT
+    d.purchase_id
+    , p.purchase_count
+    , d.product_id
+    , COUNT(1) OVER(PARTITION BY d.product_id) AS product_count
+  FROM
+    purchase_detail_log AS d
+    CROSS JOIN
+      purchase_id_count AS p
+)
+SELECT 
+  *
+FROM
+  purchase_detail_log_with_counts
+ORDER BY
+  product_id, purchase_id
+;
+```
 
 
+```{sql}
+```{sql}
+WITH
+purchase_id_count AS (
+  SELECT COUNT(DISTINCT purchase_id) AS purchase_count
+  FROM  purchase_detail_log
+)
+, purchase_detail_log_with_counts AS (
+  SELECT
+    d.purchase_id
+    , p.purchase_count
+    , d.product_id
+    , COUNT(1) OVER(PARTITION BY d.product_id) AS product_count
+  FROM
+    purchase_detail_log AS d
+    CROSS JOIN
+      purchase_id_count AS p
+)
+, product_pair_with_stat AS (
+  SELECT
+    l1.product_id AS p1
+    , l2.product_id AS p2 
+    , l1.product_count AS p1_count
+    , l2.product_count AS p2_count
+    , COUNT(11) AS p1_p2_count
+    , l1.purchase_count AS purchase_count
+  FROM
+    purchase_detail_log_with_counts AS l1
+    INNER JOIN
+      purchase_detail_log_with_counts AS l2
+      ON l1.purchase_id = l2.purchase_id
+  WHERE
+    l1.product_id <> l2.product_id
+  GROUP BY
+    l1.product_id
+    , l2.product_id
+    , l1.product_count
+    , l2.product_count
+    , l1.purchase_count
+)
+SELECT
+  p1
+  , p2
+  , 100. * p1_p2_count / purchase_count AS support
+  , 100. * p1_p2_count / p1_count AS confidence
+  ,  (100. * p1_p2_count / p1_count)
+     / (100. * p2_count / purchase_count) AS lift
+FROM
+  product_pair_with_stat
+ORDER BY
+  p1, p2
+;
+```
 
-
-
-
-
-
-
-
+もう疲れたのでやらない..
 
 
 

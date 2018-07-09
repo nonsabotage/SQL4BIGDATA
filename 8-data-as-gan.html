@@ -1291,6 +1291,91 @@ search_result_with_correct_items <span class="kw">AS</span> (
 </div>
 </div>
 </div>
+<div class="section level2">
+<h2>検索結果の順位を考慮した指標</h2>
+<div id="map" class="section level3">
+<h3>MAP</h3>
+<p>Mean Average Precision とは 「それぞれの正解アイテムがランキング中に初めて登場した順位における適合率の平均」</p>
+<div class="sourceCode"><pre class="sourceCode sql"><code class="sourceCode sql"><span class="kw">WITH</span>
+search_result_with_correct_items <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    <span class="kw">COALESCE</span>(r.keyword, c.keyword) <span class="kw">AS</span> keyword
+    , r.rank
+    , <span class="kw">COALESCE</span>(r.item, c.item) <span class="kw">AS</span> item
+    , <span class="kw">CASE</span> <span class="kw">WHEN</span> c.item <span class="kw">IS</span> <span class="kw">NOT</span> <span class="kw">NULL</span> <span class="kw">THEN</span> <span class="dv">1</span> <span class="kw">ELSE</span> <span class="dv">0</span> <span class="kw">END</span> <span class="kw">AS</span> correct
+  <span class="kw">FROM</span>
+    search_result <span class="kw">AS</span> r
+    <span class="kw">FULL</span> <span class="kw">OUTER</span> <span class="kw">JOIN</span>
+      correct_result <span class="kw">AS</span> c
+      <span class="kw">ON</span> r.keyword = c.keyword
+      <span class="kw">AND</span> r.item = c.item
+)
+, search_result_with_precision <span class="kw">AS</span> (
+  <span class="kw">SELECT</span> *
+  , <span class="fu">SUM</span>(correct)
+    <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> keyword <span class="kw">ORDER</span> <span class="kw">BY</span> <span class="kw">COALESCE</span>(<span class="fu">rank</span>, <span class="dv">10000</span>) <span class="kw">ASC</span>
+    <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>) <span class="kw">AS</span> cum_correct
+  , <span class="kw">CASE</span>
+    <span class="kw">WHEN</span> <span class="fu">rank</span> <span class="kw">IS</span> <span class="kw">NULL</span> <span class="kw">THEN</span> .<span class="dv">0</span>
+    <span class="kw">ELSE</span>
+      <span class="dv">100</span>. 
+      * <span class="fu">SUM</span>(correct)
+          <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> keyword <span class="kw">ORDER</span> <span class="kw">BY</span> <span class="kw">COALESCE</span>(<span class="fu">rank</span>, <span class="dv">10000</span>) <span class="kw">ASC</span>
+            <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+          / <span class="fu">COUNT</span>(<span class="dv">1</span>) 
+              <span class="kw">OVER</span>(<span class="kw">PARTITION</span> <span class="kw">BY</span> keyword <span class="kw">ORDER</span> <span class="kw">BY</span> <span class="kw">COALESCE</span>(<span class="fu">rank</span>, <span class="dv">10000</span>) <span class="kw">ASC</span>
+                <span class="kw">ROWS</span> <span class="kw">BETWEEN</span> <span class="kw">UNBOUNDED</span> <span class="kw">PRECEDING</span> <span class="kw">AND</span> <span class="kw">CURRENT</span> <span class="kw">ROW</span>)
+    <span class="kw">END</span> <span class="kw">AS</span> <span class="dt">precision</span>
+  <span class="kw">FROM</span>
+    search_result_with_correct_items
+)
+, average_precision_for_keywords <span class="kw">AS</span> (
+  <span class="kw">SELECT</span>
+    keyword
+    , <span class="fu">AVG</span>(<span class="dt">precision</span>) <span class="kw">AS</span> average_precision
+  <span class="kw">FROM</span>
+    search_result_with_precision
+  <span class="kw">WHERE</span>
+    correct = <span class="dv">1</span>
+  <span class="kw">GROUP</span> <span class="kw">BY</span>
+    keyword
+)
+<span class="kw">SELECT</span> * <span class="kw">FROM</span> average_precision_for_keywords;</code></pre></div>
+<div class="knitsql-table">
+<table>
+<caption>4 records</caption>
+<thead>
+<tr class="header">
+<th align="left">keyword</th>
+<th align="right">average_precision</th>
+</tr>
+</thead>
+<tbody>
+<tr class="odd">
+<td align="left">hive</td>
+<td align="right">100.00000</td>
+</tr>
+<tr class="even">
+<td align="left">postgres</td>
+<td align="right">14.72222</td>
+</tr>
+<tr class="odd">
+<td align="left">redshift</td>
+<td align="right">0.00000</td>
+</tr>
+<tr class="even">
+<td align="left">sql</td>
+<td align="right">40.00000</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</div>
+</div>
+<div class="section level1">
+<h1>データマイニング</h1>
+<p>本来はＲやＰｙｔｈｏｎを用いる. ここでは<strong>アソシエーション</strong></p>
 </div>
 <div class="section level1">
 <h1>コネクションの削除</h1>
