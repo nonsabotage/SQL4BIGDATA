@@ -656,7 +656,6 @@ ORDER BY
 
 
 ```{sql}
-```{sql}
 WITH
 purchase_id_count AS (
   SELECT COUNT(DISTINCT purchase_id) AS purchase_count
