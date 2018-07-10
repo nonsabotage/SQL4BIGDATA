@@ -82,12 +82,13 @@ h2 {
   color: black;
 }
 h3 {
+    border-bottom: solid 2px #c8c8c8;
+    color: black;
     padding-bottom: 0.5em;
     padding-top: 0.5em;
     padding-left: 15px;
     margin-top: 1.5em;
     margin-bottom: 0.5em;
-    color: black;
 }
 h4 {
   padding-left: 15px;
