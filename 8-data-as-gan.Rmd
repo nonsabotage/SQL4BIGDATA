@@ -11,8 +11,11 @@ output:
         include:
             - in_header: in_head.html
         df_print: "paged"
+        number_section: true
   
 ---
+
+update `r Sys.time()`
 
 課題発見と問題解決の手法に続いて, 検索エンジンの最適化をはじめ, 
 レコメンドの作成や並び順の最適化など,　より発展的なデータ亜活用とあｒたな価値を創造する手法を

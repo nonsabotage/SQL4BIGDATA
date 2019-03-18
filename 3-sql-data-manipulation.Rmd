@@ -11,6 +11,7 @@ output:
         include:
             - in_header: in_head.html
         df_print: "paged"
+        number_section: true
 
 ---
 

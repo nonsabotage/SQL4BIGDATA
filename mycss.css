@@ -2,9 +2,9 @@ body {
   padding: 3em;
   /*font-family:"游明朝", YuMincho, "ヒラギノ明朝 ProN W3", "Hiragino Mincho ProN", "HG明朝E",'Source Code Pro',monospace,"ヒラギノ角ゴ Pro W3",メイリオ,Arial,Verdana,"ＭＳ Ｐゴシック",sans-serif;;*/
   font-family:游ゴシック,Arial, Helvetica, 游ゴシック, YuGothic, "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
-  font-size: 21px;'Source Code Pro'
+  font-size: 24px;'Source Code Pro'
   line-height: 1.5;
-  color: #333333;
+  color: rgb(0,0,0,.87);;
   background:#fa;
 }
 
@@ -21,27 +21,30 @@ pre.souceCode{
 
 p {
     margin-bottom: 1em;
-    margin-top: 2em;
+    margin-top: 1.5em;
+    font-size: 24px;
 }
-p + p{
+/*p:first-letter {
+  padding-left: 1em;
+}*/
+p + p {
     margin-bottom: 1em;
     margin-top: 0.5em;
 }
 
 ul, ol, p {
     font-family:游ゴシック,"游明朝", "HG明朝E",'Source Code Pro',sans-serif;;
-    font-size: 21px;
     line-height: 1.6;
     padding-left: 15px;
 }
 ul, ol {
-  color: #1256A4;
-  padding: 0.5em 0 0.5em 1.5em;
+  margin-left: 45px;
+  font-weight: bold;
+  font-size: 18px;
 }
-
 ul li, ol li {
   line-height: 1.5;
-  list-style: disc;
+  padding: 0.5em 0;
 }
 strong {
   color: red;
@@ -56,41 +59,74 @@ h1, h2, h3, h4, h5, h6 {
     font-weight: bold;
 }
 h1 {
-    font-size: 36px;
-    padding: 0.5em;
+    font-size: 32px;
+    padding: 0.3em;
+    padding-left: 0.7em;
     margin-top: 3em;
     margin-bottom: 0.5em;
-    border-bottom: solid 5px #1256A4;
-    color: black;
+    border-left: solid 7px #006400;
+    color: rgba(0,0,0,.87);
     background-color: white;
 }
 h1.title {
   text-align: center;
-  color: black;
+  color: rgba(0,0,0,.87);
   font-size: 36px;
-  background-color: white;
-  border: solid 0px white;
+  background-color: whtie;
+  border: solid 0px #006400;
+}
+h1.title {
+  position: relative;
+  line-height: 1.4;
+  padding:0.25em 1em;
+  top:0;
+}
+
+h1.title:before,h1.title:after{
+  position: absolute;
+  top: 0;
+  content:'';
+  width: 8px;
+  height: 100%;
+  display: inline-block;
+}
+h1.title:before{
+  border-left: solid 1px #006400;
+  border-top: solid 1px #006400;
+  border-bottom: solid 1px #006400;
+  left: 0;
+}
+h1.title:after{
+  content: '';
+  border-top: solid 1px #006400;
+  border-right: solid 1px #006400;
+  border-bottom: solid 1px #006400;
+  right: 0;
 }
 h2 {
-  border-left:#1253A4 7px solid;
-  padding:5px;
-  padding-left:20px;
-  padding-bottom: 0.5em;
-  margin-bottom: 0.5em;
-  margin-top: 1.5em;
+  color: #006400;/*文字色*/
+  padding: 0.5em;/*文字周りの余白*/
+  padding-left: 0em;
+  /*display: inline-block;/*おまじない*/
+  line-height: 1.3;/*行高*/
+  vertical-align: middle;/*上下中央*/
   font-size: 28px;
-  color: black;
+  margin-top: 2em;
+  border-bottom: solid 2px rgba(0,0,0,.12);
 }
 h3 {
-    border-bottom: solid 2px #c8c8c8;
-    color: black;
+    color: #006400;
     padding-bottom: 0.5em;
     padding-top: 0.5em;
-    padding-left: 15px;
+    padding-left: 0em;
     margin-top: 1.5em;
     margin-bottom: 0.5em;
+    font-size: 24px;
 }
 h4 {
+  color: #006400;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
   padding-left: 15px;
 }
 li.ist-group-iteml.active {
@@ -100,41 +136,34 @@ li.list-group-item.active:hover {
   background-color: #F26964;
 }
 
+a {
+  color: #000099;
+}
+a:hover{
+  color: #006400;
+}
 blockquote {
     position: relative;
     padding: 10px 15px 10px 50px;
     box-sizing: border-box;
-    font-style: italic;
-    border: solid 2px #464646;
+    font-weight: bold;
+    /*border: solid 2px #464646;*/
+    background-color: #f8f8f8;
     color: #464646;
     margin:1.5em 2em 1.5em 2em;
 }
-
-blockquote:before{
-    display: inline-block;
-    position: absolute;
-    top: 10px;
-    left: 0;
-    vertical-align: middle;
-    content: "“";
-    font-family: sans-serif;
-    color: #77c0c9;
-    font-size: 90px;
-    line-height: 1;
-}
-
 blockquote p {
     padding: 0;
     margin: 10px 0;
     line-height: 1.7;
 }
-
 blockquote cite {
     display: block;
     text-align: right;
     color: #888888;
     font-size: 0.9em;
 }
+
 .math{
   font-size: 25px;
   font-family: "Computer Modern";
@@ -150,6 +179,9 @@ pre math {
   font-family: "Computer Modern";
 }
 
+p code {
+  font-weight: bold;
+}
 
 code,
 pre {
@@ -166,7 +198,7 @@ p strong {
   white-space: nowrap;
   background: linear-gradient(transparent 60%, #FFD464 60%);
   font-weight: bold;
-  color: black;
+  color: rgb(0,0,0,.87);
 }
 
 pre {
@@ -200,12 +232,8 @@ ul.tocify-header, ul.tocify-subheader {
   font-size: 13px;
 }
 li.list-group-item.active {
-  background-color: #F26964;
+  background-color: #006400;
 }
 li.list-group-item.active:hover {
-  background-color: #F26964;
+  background-color: #006400;
 }
-
-
-
-
